@@ -520,6 +520,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       label: m,
       description: m === current ? "● in use" : undefined,
     }));
+    items.push({
+      label: "$(sync) Fetch from NVIDIA catalog…",
+      description: "Browse chat models from the NVIDIA catalog",
+    });
     items.push({ label: "$(edit) Enter manually…", description: "Enter a model ID manually" });
 
     const pick = await vscode.window.showQuickPick(items, {
@@ -527,6 +531,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       placeHolder: `Current: ${current}`,
     });
     if (!pick) {
+      return;
+    }
+
+    // NVIDIA 카탈로그에서 채팅 모델을 가져와 선택
+    if (pick.label.startsWith("$(sync)")) {
+      await this.pickModelFromCatalog(current);
       return;
     }
 
@@ -548,6 +558,54 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     await cfg.update("model", model, vscode.ConfigurationTarget.Global);
+    this.post({ type: "system", text: `✅ Model changed: ${model}` });
+  }
+
+  /** NVIDIA 카탈로그에서 채팅 모델을 골라 nemotron.model 로 설정하고 목록에 등록 */
+  private async pickModelFromCatalog(current: string): Promise<void> {
+    let ids: string[] = [];
+    try {
+      ids = await this.fetchCatalogModels(isChatModel);
+    } catch (e: any) {
+      this.post({
+        type: "error",
+        text: "Failed to fetch model catalog: " + String(e?.message ?? e),
+      });
+      return;
+    }
+    if (ids.length === 0) {
+      this.post({ type: "error", text: "No chat models were returned." });
+      return;
+    }
+
+    const items: vscode.QuickPickItem[] = ids.map((id) => ({
+      label: id,
+      description: id === current ? "● current" : undefined,
+      detail: "$(sparkle) " + autoAgentDesc(id),
+    }));
+    const pick = await vscode.window.showQuickPick(items, {
+      title: `NVIDIA catalog — ${ids.length} chat models`,
+      placeHolder: "Select a model to use",
+      matchOnDetail: true,
+    });
+    if (!pick) {
+      return;
+    }
+
+    const model = pick.label;
+    const cfg = vscode.workspace.getConfiguration("nemotron");
+    // ① 현재 모델로 설정
+    await cfg.update("model", model, vscode.ConfigurationTarget.Global);
+    // ② 프리셋 목록(nemotron.models)에 없으면 추가
+    const presets = cfg.get<string[]>("models", []);
+    if (!presets.includes(model)) {
+      await cfg.update(
+        "models",
+        [...presets, model],
+        vscode.ConfigurationTarget.Global
+      );
+    }
+    // ③ 웹뷰에 변경 알림
     this.post({ type: "system", text: `✅ Model changed: ${model}` });
   }
 
@@ -784,33 +842,43 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  /** NVIDIA 무료 엔드포인트 카탈로그(/v1/models)에서 nvidia/ 모델을 가져와 sub-agent 갱신 */
-  private async syncAgents(): Promise<void> {
+  /**
+   * NVIDIA 카탈로그(/v1/models)에서 filter 를 통과하는 모델 ID 목록을 정렬해 반환한다.
+   * 진행 표시 포함, API 키가 없거나 요청이 실패하면 throw 한다.
+   */
+  private async fetchCatalogModels(
+    filter: (id: string) => boolean
+  ): Promise<string[]> {
     const key = await this.getApiKey();
     if (!key) {
-      return;
+      throw new Error("NVIDIA API key is not set.");
     }
+    return vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: "Fetching NVIDIA model catalog…",
+      },
+      async () => {
+        const resp = await fetch("https://integrate.api.nvidia.com/v1/models", {
+          headers: { Authorization: `Bearer ${key}` },
+        });
+        if (!resp.ok) {
+          throw new Error(`HTTP ${resp.status}`);
+        }
+        const json: any = await resp.json();
+        return (json?.data ?? [])
+          .map((m: any) => String(m?.id ?? ""))
+          .filter((id: string) => filter(id))
+          .sort();
+      }
+    );
+  }
+
+  /** NVIDIA 무료 엔드포인트 카탈로그(/v1/models)에서 nvidia/ 모델을 가져와 sub-agent 갱신 */
+  private async syncAgents(): Promise<void> {
     let ids: string[] = [];
     try {
-      ids = await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Notification,
-          title: "Fetching NVIDIA model list…",
-        },
-        async () => {
-          const resp = await fetch("https://integrate.api.nvidia.com/v1/models", {
-            headers: { Authorization: `Bearer ${key}` },
-          });
-          if (!resp.ok) {
-            throw new Error(`HTTP ${resp.status}`);
-          }
-          const json: any = await resp.json();
-          return (json?.data ?? [])
-            .map((m: any) => String(m?.id ?? ""))
-            .filter((id: string) => isNvidiaChatModel(id))
-            .sort();
-        }
-      );
+      ids = await this.fetchCatalogModels(isNvidiaChatModel);
     } catch (e: any) {
       this.post({
         type: "error",
@@ -2158,6 +2226,20 @@ function isNvidiaChatModel(id: string): boolean {
   }
   // LLM 계열 키워드
   return /nemotron|llama|instruct|chat|mistral|minitron|openmath|opencode|openreasoning/i.test(
+    id
+  );
+}
+
+/** 발행사와 무관하게 대화형(채팅) 모델인지 판별 (카탈로그 전체 탐색용) */
+function isChatModel(id: string): boolean {
+  // 비채팅 NIM(임베딩/음성/비전 파이프라인 등) + 이미지 생성 계열 제외
+  const nonChat =
+    /embed|rerank|retriev|ocr|paddle|asr|tts|riva|parakeet|canary|maxine|studiovoice|eyecontact|background|bio|genmol|molmim|diffdock|corrdiff|fourcastnet|earth2|cuopt|clip|nvclip|vista|guard|safety|aegis|hifigan|fastpitch|megatron|stable-diffusion|sdxl|flux|consistory|sana/i;
+  if (nonChat.test(id)) {
+    return false;
+  }
+  // 채팅 LLM 계열 키워드 (발행사 무관)
+  return /nemotron|llama|qwen|deepseek|mistral|mixtral|gemma|phi-|granite|command|jamba|arctic|dbrx|instruct|chat|minitron|openmath|opencode|openreasoning/i.test(
     id
   );
 }
