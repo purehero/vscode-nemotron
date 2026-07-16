@@ -1,0 +1,327 @@
+{
+  "name": "nemotron-chat",
+  "displayName": "Nemotron Chat",
+  "description": "NVIDIA Nemotron AI chat and coding assistant for VSCode",
+  "version": "0.2.0",
+  "publisher": "local",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/purehero/vscode-nemotron"
+  },
+  "bugs": {
+    "url": "https://github.com/purehero/vscode-nemotron/issues"
+  },
+  "homepage": "https://github.com/purehero/vscode-nemotron#readme",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Programming Languages",
+    "Chat"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "nemotron",
+          "title": "Nemotron",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "nemotron": [
+        {
+          "id": "nemotron.chatView",
+          "name": "Chat",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "nemotron.setApiKey",
+        "title": "Set API Key",
+        "category": "Nemotron"
+      },
+      {
+        "command": "nemotron.clearApiKey",
+        "title": "Clear API Key",
+        "category": "Nemotron"
+      },
+      {
+        "command": "nemotron.newChat",
+        "title": "New Session",
+        "category": "Nemotron",
+        "icon": "$(add)"
+      },
+      {
+        "command": "nemotron.showHistory",
+        "title": "Session History",
+        "category": "Nemotron",
+        "icon": "$(history)"
+      },
+      {
+        "command": "nemotron.moveToSecondaryBar",
+        "title": "Move Chat to Secondary Side Bar",
+        "category": "Nemotron"
+      },
+      {
+        "command": "nemotron.openInEditor",
+        "title": "Open in Editor Tab (can be moved to a separate window)",
+        "category": "Nemotron",
+        "icon": "$(multiple-windows)"
+      },
+      {
+        "command": "nemotron.explainSelection",
+        "title": "Explain Selected Code",
+        "category": "Nemotron"
+      },
+      {
+        "command": "nemotron.refactorSelection",
+        "title": "Refactor Selected Code",
+        "category": "Nemotron"
+      },
+      {
+        "command": "nemotron.documentSelection",
+        "title": "Add Comments/Documentation to Selected Code",
+        "category": "Nemotron"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "nemotron.openInEditor",
+          "when": "view == nemotron.chatView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "nemotron.showHistory",
+          "when": "view == nemotron.chatView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "nemotron.newChat",
+          "when": "view == nemotron.chatView",
+          "group": "navigation@3"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "nemotron.explainSelection",
+          "when": "editorHasSelection",
+          "group": "nemotron@1"
+        },
+        {
+          "command": "nemotron.refactorSelection",
+          "when": "editorHasSelection",
+          "group": "nemotron@2"
+        },
+        {
+          "command": "nemotron.documentSelection",
+          "when": "editorHasSelection",
+          "group": "nemotron@3"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "nemotron.newChat",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Nemotron",
+      "properties": {
+        "nemotron.model": {
+          "type": "string",
+          "default": "nvidia/nemotron-3-ultra-550b-a55b",
+          "description": "Model ID to use"
+        },
+        "nemotron.models": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [
+            "nvidia/nemotron-3-ultra-550b-a55b",
+            "nvidia/llama-3.3-nemotron-super-49b-v1",
+            "nvidia/llama-3.1-nemotron-70b-instruct",
+            "meta/llama-3.3-70b-instruct",
+            "deepseek-ai/deepseek-r1"
+          ],
+          "description": "Model list shown in the '/model' command. Add or edit any model IDs your API key can access."
+        },
+        "nemotron.systemPrompt": {
+          "type": "string",
+          "editPresentation": "multilineText",
+          "default": "You are an AI assistant developed by NVIDIA. Be helpful, clear, and concise. Use markdown code blocks with language tags for code. Respond in the same language the user writes in.",
+          "description": "System prompt"
+        },
+        "nemotron.temperature": {
+          "type": "number",
+          "default": 1.0,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "temperature (0 ~ 2)"
+        },
+        "nemotron.topP": {
+          "type": "number",
+          "default": 0.95,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "top_p (0 ~ 1)"
+        },
+        "nemotron.maxTokens": {
+          "type": "number",
+          "default": 16384,
+          "description": "Maximum number of tokens to generate"
+        },
+        "nemotron.reasoningBudget": {
+          "type": "number",
+          "default": 16384,
+          "description": "Reasoning budget in tokens"
+        },
+        "nemotron.enableThinking": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable and display the thinking (reasoning) process"
+        },
+        "nemotron.enableTools": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow the AI to use tools that list, read, and write workspace files"
+        },
+        "nemotron.autoMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "⚡ Auto-approve mode: perform file edits and command execution without confirmation (use with caution)"
+        },
+        "nemotron.autoApproveWrites": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically approve file writes (write_file/edit_file) without confirmation (use with caution)"
+        },
+        "nemotron.autoApproveCommands": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically approve terminal commands (run_command) without confirmation (caution: arbitrary commands will be executed)"
+        },
+        "nemotron.commandTimeout": {
+          "type": "number",
+          "default": 60000,
+          "description": "run_command execution time limit (milliseconds)"
+        },
+        "nemotron.autoContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically attach the active file and selection info when sending a message"
+        },
+        "nemotron.maxRpm": {
+          "type": "number",
+          "default": 40,
+          "minimum": 0,
+          "description": "Maximum API requests per minute (RPM). Waits automatically when exceeded. 0 = no limit"
+        },
+        "nemotron.maxToolIterations": {
+          "type": "number",
+          "default": 25,
+          "minimum": 1,
+          "description": "Maximum tool-call round trips per request. When reached, you are asked whether to continue"
+        },
+        "nemotron.showDiff": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a native diff preview when approving file changes"
+        },
+        "nemotron.persistentShell": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use a persistent shell session for run_command (keeps cd / virtualenv state)"
+        },
+        "nemotron.maxContextChars": {
+          "type": "number",
+          "default": 120000,
+          "description": "Maximum conversation context characters sent to the model. When exceeded, the oldest messages are dropped first"
+        },
+        "nemotron.agents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "model"],
+            "properties": {
+              "name": { "type": "string", "description": "sub-agent name (the AI calls it by this name)" },
+              "model": { "type": "string", "description": "NVIDIA model ID" },
+              "description": { "type": "string", "description": "Specialty description (used by the AI to decide delegation)" },
+              "systemPrompt": { "type": "string", "description": "sub-agent system prompt (chat type only)" },
+              "type": {
+                "type": "string",
+                "enum": ["chat", "image"],
+                "description": "chat (default): conversational LLM / image: text-to-image generation (genai endpoint, result saved to a file)"
+              }
+            }
+          },
+          "default": [
+            {
+              "name": "reasoner",
+              "model": "nvidia/llama-3.1-nemotron-ultra-253b-v1",
+              "description": "Specialized in hard reasoning, math, and complex code",
+              "systemPrompt": "Reason carefully step by step to reach an accurate conclusion. Use language tags in code blocks."
+            },
+            {
+              "name": "super",
+              "model": "nvidia/llama-3.3-nemotron-super-49b-v1",
+              "description": "Balanced general purpose (summarization, translation, general coding)",
+              "systemPrompt": "Answer concisely and accurately. Use language tags in code blocks."
+            },
+            {
+              "name": "nano",
+              "model": "nvidia/llama-3.1-nemotron-nano-8b-v1",
+              "description": "Lightweight and fast tasks (classification, short summaries)",
+              "systemPrompt": "Answer concisely and accurately."
+            },
+            {
+              "name": "imager",
+              "model": "stabilityai/stable-diffusion-3-medium",
+              "type": "image",
+              "description": "Specialized in text-to-image generation. Write a detailed English prompt in TASK. Results are saved to .nemotron/images/"
+            }
+          ],
+          "description": "List of sub-agents the AI can delegate to via the run_agent tool. Only NVIDIA-published models (nvidia/...) are allowed. Use '/agents → Update from NVIDIA model list' to sync with the live catalog"
+        },
+        "nemotron.restoreLastSession": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically restore the last session when VSCode starts"
+        },
+        "nemotron.godotPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the Godot executable (fallback for GDScript syntax checking). Leave empty to auto-detect godot/godot4 on PATH"
+        }
+      }
+    }
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "This extension reads and writes workspace files, so it only works in trusted folders."
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.90.0",
+    "esbuild": "^0.21.5",
+    "typescript": "^5.4.5"
+  }
+}
