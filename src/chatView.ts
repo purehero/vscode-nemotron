@@ -13,6 +13,9 @@ import {
   getAgents,
   agentInstruction,
   formatPlan,
+  listMemories,
+  formatMemoriesForPrompt,
+  MEMORY_INSTRUCTION,
 } from "./tools";
 import { RateLimiter } from "./rateLimiter";
 import { PersistentShell } from "./shell";
@@ -96,6 +99,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   // ⑪ NEMOTRON.md 프로젝트 지침 (전송 시 갱신)
   private projectDoc?: string;
   private projectDocNotified = false;
+
+  // 장기 메모리 주입 블록 (전송 시 .nemotron/memory 에서 갱신)
+  private memoryBlock?: string;
 
   // ⑫ 지속 셸 세션
   private shell?: PersistentShell;
@@ -689,12 +695,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     let sys = vscode.workspace
       .getConfiguration("nemotron")
       .get<string>("systemPrompt", "");
+    const memoryOn = vscode.workspace
+      .getConfiguration("nemotron")
+      .get<boolean>("enableMemory", true);
     if (withTools) {
-      sys = (sys ? sys + "\n\n" : "") + TOOL_INSTRUCTION + agentInstruction();
+      sys =
+        (sys ? sys + "\n\n" : "") +
+        TOOL_INSTRUCTION +
+        agentInstruction() +
+        (memoryOn ? MEMORY_INSTRUCTION : "");
     }
     // ⑪ 프로젝트 지침(NEMOTRON.md) 자동 포함
     if (this.projectDoc) {
       sys += "\n\n[Project instructions — NEMOTRON.md in the workspace]\n" + this.projectDoc;
+    }
+    // 장기 메모리 자동 포함 (세션 간 학습 내용)
+    if (memoryOn && this.memoryBlock) {
+      sys += "\n\n[Long-term memory — lessons/preferences saved across sessions]\n" + this.memoryBlock;
     }
     // 작업 계획: 미완 항목이 남아 있으면 모델이 항상 현재 계획을 보도록 덧붙인다
     if (this.plan.length > 0 && this.plan.some((it) => !it.done)) {
@@ -746,6 +763,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         type: "system",
         text: `📋 Using project instructions (NEMOTRON.md). (${this.projectDoc.length.toLocaleString("en-US")} chars)`,
       });
+    }
+  }
+
+  /** 장기 메모리(.nemotron/memory)를 읽어 주입 블록으로 캐시 */
+  private async loadMemories(): Promise<void> {
+    const cfg = vscode.workspace.getConfiguration("nemotron");
+    if (!cfg.get<boolean>("enableMemory", true)) {
+      this.memoryBlock = undefined;
+      return;
+    }
+    try {
+      const mems = await listMemories();
+      const budget = cfg.get<number>("maxMemoryChars", 8000);
+      const block = formatMemoriesForPrompt(mems, budget);
+      this.memoryBlock = block || undefined;
+    } catch {
+      this.memoryBlock = undefined;
     }
   }
 
@@ -1777,6 +1811,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.postTitle();
 
     await this.loadProjectDoc(); // ⑪ NEMOTRON.md 갱신
+    await this.loadMemories(); // 장기 메모리 갱신
     const withTools = this.toolsEnabled();
     const maxIterCfg = Math.max(
       1,
@@ -2107,6 +2142,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     if (name === "run_agent") {
       return String(args?.agent ?? "");
+    }
+    if (name === "remember") {
+      return String(args?.category ?? "note");
+    }
+    if (name === "update_memory" || name === "forget") {
+      return String(args?.id ?? "");
     }
     return "";
   }

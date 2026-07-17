@@ -191,6 +191,16 @@
           "default": true,
           "description": "Allow the AI to use tools that list, read, and write workspace files"
         },
+        "nemotron.enableMemory": {
+          "type": "boolean",
+          "default": true,
+          "description": "Long-term memory: let the AI save/recall lessons, preferences, and conventions across sessions (stored in .nemotron/memory) so it stops repeating the same mistakes"
+        },
+        "nemotron.maxMemoryChars": {
+          "type": "number",
+          "default": 8000,
+          "description": "Maximum characters of long-term memory injected into the prompt. When exceeded, the most recently created memories are kept first"
+        },
         "nemotron.autoMode": {
           "type": "boolean",
           "default": false,

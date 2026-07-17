@@ -34,6 +34,9 @@ export const TOOL_NAMES = [
   "find_references",
   "update_plan",
   "run_agent",
+  "remember",
+  "update_memory",
+  "forget",
 ] as const;
 
 /** sub-agent 정의 (설정 nemotron.agents) */
@@ -739,6 +742,108 @@ export async function readWorkspaceText(
   return { text: new TextDecoder("utf-8").decode(bytes), truncated: false };
 }
 
+// ── 장기 메모리(Long-term Memory) ────────────────────────────────
+// AI 가 세션을 넘어 교훈/선호/규약을 스스로 기록·참조·수정하는 저장소.
+// 파일 1개 = 메모리 1개: .nemotron/memory/<id>.md (프런트매터 + 본문)
+const MEMORY_DIR = ".nemotron/memory";
+
+export interface MemoryEntry {
+  id: string;
+  category: string;
+  created: string;
+  content: string;
+}
+
+function memoryUri(id: string): vscode.Uri {
+  return safeUri(`${MEMORY_DIR}/${id}.md`);
+}
+
+function parseMemory(id: string, text: string): MemoryEntry {
+  let category = "note";
+  let created = "";
+  let content = text.trim();
+  const m = text.match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/);
+  if (m) {
+    content = m[2].trim();
+    const cat = m[1].match(/category:\s*(.+)/);
+    const cr = m[1].match(/created:\s*(.+)/);
+    if (cat) {
+      category = cat[1].trim();
+    }
+    if (cr) {
+      created = cr[1].trim();
+    }
+  }
+  return { id, category, created, content };
+}
+
+function serializeMemory(category: string, created: string, content: string): Uint8Array {
+  const body = `---\ncategory: ${category}\ncreated: ${created}\n---\n${content}\n`;
+  return new TextEncoder().encode(body);
+}
+
+/** 저장된 모든 메모리를 최신 생성 순으로 읽는다. */
+export async function listMemories(): Promise<MemoryEntry[]> {
+  let dir: [string, vscode.FileType][];
+  try {
+    dir = await vscode.workspace.fs.readDirectory(safeUri(MEMORY_DIR));
+  } catch {
+    return [];
+  }
+  const out: MemoryEntry[] = [];
+  for (const [name, type] of dir) {
+    if (type !== vscode.FileType.File || !name.endsWith(".md")) {
+      continue;
+    }
+    try {
+      const bytes = await vscode.workspace.fs.readFile(safeUri(`${MEMORY_DIR}/${name}`));
+      out.push(parseMemory(name.replace(/\.md$/, ""), new TextDecoder("utf-8").decode(bytes)));
+    } catch {
+      /* 개별 파일 오류는 건너뛴다 */
+    }
+  }
+  out.sort((a, b) => (a.created < b.created ? 1 : a.created > b.created ? -1 : 0));
+  return out;
+}
+
+/** system prompt 주입용 문자열 (예산 안에서 최신순으로 채운다). */
+export function formatMemoriesForPrompt(mems: MemoryEntry[], budget: number): string {
+  const lines: string[] = [];
+  let acc = 0;
+  for (const m of mems) {
+    const line = `- (${m.id}) [${m.category}] ${m.content.replace(/\s*\n\s*/g, " ")}`;
+    if (lines.length > 0 && acc + line.length > budget) {
+      break;
+    }
+    acc += line.length;
+    lines.push(line);
+  }
+  return lines.join("\n");
+}
+
+/** 메모리 도구 사용 안내 (설정에서 켜졌을 때만 system prompt 에 덧붙임). */
+export const MEMORY_INSTRUCTION = [
+  "",
+  "Long-term memory:",
+  "- Relevant saved memories appear at the top of this prompt under [Long-term memory], each with an (id).",
+  "- Honor them before acting. When you learn something durable — a mistake you made and its fix, a user preference, or a project convention — save it with the remember tool so future sessions won't repeat it.",
+  "- If a memory turns out wrong or outdated, correct it with update_memory or delete it with forget (reference it by its id).",
+  "- Do NOT save trivial/one-off details or things already visible in the code, git, or NEMOTRON.md. Keep each memory a single concise fact.",
+  "",
+  "```tool",
+  "remember",
+  "category: mistake",
+  "<<<CONTENT",
+  "The build entry is esbuild.js (run `npm run build`); this project has no webpack config.",
+  "<<<END",
+  "```",
+  "",
+  "```tool",
+  "forget",
+  "id: mabc123",
+  "```",
+].join("\n");
+
 export interface ToolContext {
   /**
    * 파일 변경 승인 (true=허용). summary 는 변경 요약,
@@ -1376,6 +1481,62 @@ export async function runTool(call: ToolCall, ctx: ToolContext): Promise<ToolRes
         }
         const r = await ctx.runAgent(agent, task);
         return { name: call.name, ok: r.ok, output: r.output, preview: r.preview };
+      }
+      case "remember": {
+        const content = String(call.args?.content ?? "").trim();
+        const category = String(call.args?.category ?? "note").trim() || "note";
+        if (!content) {
+          throw new Error("A <<<CONTENT ... <<<END block with the memory text is required.");
+        }
+        const id = "m" + Date.now().toString(36);
+        const created = new Date().toISOString().slice(0, 10);
+        await vscode.workspace.fs.createDirectory(safeUri(MEMORY_DIR));
+        await vscode.workspace.fs.writeFile(memoryUri(id), serializeMemory(category, created, content));
+        return {
+          name: call.name,
+          ok: true,
+          output: `Memory saved (id ${id}, ${category}): ${content}`,
+          preview: `🧠 remembered [${category}] (${id})`,
+        };
+      }
+      case "update_memory": {
+        const id = String(call.args?.id ?? "").trim();
+        const content = String(call.args?.content ?? "").trim();
+        if (!id || !content) {
+          throw new Error("An id key and a <<<CONTENT ... <<<END block are both required.");
+        }
+        let prev: MemoryEntry;
+        try {
+          const bytes = await vscode.workspace.fs.readFile(memoryUri(id));
+          prev = parseMemory(id, new TextDecoder("utf-8").decode(bytes));
+        } catch {
+          throw new Error(`No memory with id '${id}'.`);
+        }
+        const created = prev.created || new Date().toISOString().slice(0, 10);
+        await vscode.workspace.fs.writeFile(memoryUri(id), serializeMemory(prev.category, created, content));
+        return {
+          name: call.name,
+          ok: true,
+          output: `Memory updated (id ${id}): ${content}`,
+          preview: `🧠 updated (${id})`,
+        };
+      }
+      case "forget": {
+        const id = String(call.args?.id ?? "").trim();
+        if (!id) {
+          throw new Error("An id key is required.");
+        }
+        try {
+          await vscode.workspace.fs.delete(memoryUri(id));
+        } catch {
+          throw new Error(`No memory with id '${id}'.`);
+        }
+        return {
+          name: call.name,
+          ok: true,
+          output: `Memory forgotten (id ${id}).`,
+          preview: `🧠 forgot (${id})`,
+        };
       }
       default:
         return {
