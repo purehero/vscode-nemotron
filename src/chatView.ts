@@ -688,13 +688,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private params(): StreamParams {
     const c = vscode.workspace.getConfiguration("nemotron");
+    const enableThinking = c.get<boolean>("enableThinking", true);
+    const reasoningBudget = c.get<number>("reasoningBudget", 16384);
+    let maxTokens = c.get<number>("maxTokens", 16384);
+    // 안전장치: 사고(reasoning) 토큰도 출력 예산(max_tokens)에서 소비되므로,
+    // 사고 예산이 출력 예산에 육박하면 정작 답변이 남지 않을 수 있다.
+    // 사고가 켜져 있고 여유가 부족하면 답변용 여유분(4096)을 확보한다(사고 예산은 줄이지 않음).
+    const ANSWER_HEADROOM = 4096;
+    if (enableThinking && reasoningBudget > 0 && maxTokens < reasoningBudget + ANSWER_HEADROOM) {
+      maxTokens = reasoningBudget + ANSWER_HEADROOM;
+    }
     return {
       model: c.get<string>("model", "nvidia/nemotron-3-ultra-550b-a55b"),
       temperature: c.get<number>("temperature", 1.0),
       topP: c.get<number>("topP", 0.95),
-      maxTokens: c.get<number>("maxTokens", 16384),
-      reasoningBudget: c.get<number>("reasoningBudget", 16384),
-      enableThinking: c.get<boolean>("enableThinking", true),
+      maxTokens,
+      reasoningBudget,
+      enableThinking,
     };
   }
 
