@@ -9,6 +9,8 @@ import { PersistentShell, detectShell } from "./shell";
 export interface ToolCall {
   name: string;
   args: Record<string, any>;
+  /** 응답이 잘려 이 호출이 미완성(닫는 ``` 또는 <<<END 누락)임 — 실행 금지 신호 */
+  truncated?: boolean;
 }
 
 export interface ToolResult {
@@ -251,9 +253,14 @@ export function parseToolCalls(text: string): ToolCall[] {
       block.push(lines[i]);
       i++;
     }
+    // 닫는 펜스를 만나지 못하고 EOF 로 끝났다면 응답이 잘린 것
+    const fenceClosed = i < lines.length;
     i++; // 닫는 펜스(또는 EOF) 건너뛰기
     const call = parseBlock(tag, block);
     if (call) {
+      if (!fenceClosed) {
+        call.truncated = true;
+      }
       calls.push(call);
     }
   }
@@ -388,7 +395,13 @@ function parseBlock(tag: string, lines: string[]): ToolCall | null {
   if (hasPlan) {
     args.plan = planBuf.join("\n");
   }
-  return { name, args };
+  // 구분자 블록(<<<CONTENT/<<<OLD/<<<NEW/…)이 <<<END 로 닫히지 않은 채
+  // 끝났다면 응답이 그 블록 도중에 잘린 것 → 미완성 호출로 표시
+  const call: ToolCall = { name, args };
+  if (section !== null) {
+    call.truncated = true;
+  }
+  return call;
 }
 
 /** 모델이 도구를 호출하려 시도했는지(형식이 깨졌어도) 감지한다. */

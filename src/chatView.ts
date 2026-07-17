@@ -1827,6 +1827,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     let lastAnswer = "";
     let emptyRetries = 0;
     let continueNudges = 0;
+    let truncationRetries = 0;
     let usedToolsThisTurn = false;
 
     try {
@@ -1850,6 +1851,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.liveReasoning = "";
         this.post({ type: "botStart" });
         let answer = "";
+        let finishReason = "";
 
         for await (const ev of streamChat(
           key,
@@ -1870,6 +1872,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             answer += ev.text ?? "";
             this.liveAnswer = answer;
             this.post({ type: "content", text: ev.text });
+          } else if (ev.type === "finish") {
+            finishReason = ev.finishReason ?? finishReason;
           }
         }
         this.post({ type: "botEnd" });
@@ -1962,6 +1966,50 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         usedToolsThisTurn = true;
         this.history.push({ role: "assistant", content: answer, hidden: true });
         this.post({ type: "dropLastBot" });
+
+        // 잘린 파일 쓰기 방지: 응답이 도중에 끊겨 write_file/edit_file/apply_bytes 가
+        // 미완성(닫는 ``` 또는 <<<END 누락)인 채로 실행되면 원본이 잘린 내용으로
+        // 덮여 복구가 어렵다. 실행하지 않고, 파일이 그대로임을 알린 뒤
+        // 완전한 호출을 다시 요청한다.
+        const WRITE_TOOLS = ["write_file", "edit_file", "apply_bytes"];
+        const truncatedWrite = calls.some(
+          (c) => WRITE_TOOLS.includes(c.name) && c.truncated
+        );
+        if (truncatedWrite) {
+          // 잘린 쓰기는 iterBudget 과 무관하게 절대 실행하지 않는다.
+          const byLimit = finishReason === "length";
+          if (truncationRetries < 3) {
+            truncationRetries++;
+            this.post({
+              type: "tool",
+              name: "Truncated response",
+              detail:
+                (byLimit ? "Hit the token limit" : "Response was cut off") +
+                ` before the file write finished — file left unchanged, retrying (${truncationRetries}/3)`,
+            });
+            this.history.push({
+              role: "user",
+              content:
+                "Your previous response was cut off " +
+                (byLimit ? "at the token limit " : "") +
+                "before the file-writing tool call was complete, so it was NOT applied and the file remains unchanged. " +
+                "Resend the COMPLETE tool call. If the file is large, do NOT rewrite the whole file with write_file — " +
+                "use edit_file to change only the necessary part, or split the work into several smaller edit_file calls." +
+                (byLimit ? " (You can also raise the nemotron.maxTokens setting.)" : ""),
+              hidden: true,
+            });
+            continue;
+          }
+          // 재시도 한도 초과: 파일을 손상시키지 않도록 실행을 포기하고 종료
+          this.post({
+            type: "system",
+            text:
+              "⚠️ The response kept getting cut off, so the file write was not applied (the file is unchanged). " +
+              "Raise nemotron.maxTokens or ask for a smaller change.",
+          });
+          break;
+        }
+        truncationRetries = 0; // 정상 도구 턴이면 카운터 리셋
 
         if (iter >= iterBudget) {
           if (this.isAutoMode()) {
