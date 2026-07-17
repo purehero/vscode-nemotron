@@ -263,6 +263,21 @@
           "default": 600000,
           "description": "Maximum conversation context characters sent to the model. When exceeded, user requests and final answers are kept first, then the most recent tool outputs. Nemotron models support up to ~1M tokens, so a large value keeps earlier context (e.g. what problem you asked to fix) available across turns"
         },
+        "nemotron.toolResultFullCount": {
+          "type": "number",
+          "default": 3,
+          "description": "How many of the most recent tool/command results to keep in full. Older results are shortened (head+tail, or an LLM summary when nemotron.summarizeToolResults is on) so long build/log outputs don't fill the context"
+        },
+        "nemotron.summarizeToolResults": {
+          "type": "boolean",
+          "default": false,
+          "description": "Summarize old, large tool/command outputs with a small model instead of just trimming them (head+tail). More concise but adds an extra API call per summarized result. When off, only rule-based trimming is used"
+        },
+        "nemotron.summarizeModel": {
+          "type": "string",
+          "default": "",
+          "description": "Model used to summarize old tool outputs (only when nemotron.summarizeToolResults is on). Leave empty to reuse nemotron.model; set a smaller/cheaper model (e.g. a Nemotron Nano) to reduce cost"
+        },
         "nemotron.agents": {
           "type": "array",
           "items": {
