@@ -2247,6 +2247,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     let continueNudges = 0;
     let truncationRetries = 0;
     let usedToolsThisTurn = false;
+    // 완료 게이트용: 이번 실행에서 파일 편집이 있었는지 + 검증 재시도 횟수
+    let editedThisRun = false;
+    let verifyRetries = 0;
 
     try {
       for (let iter = 0; ; iter++) {
@@ -2423,6 +2426,77 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             });
             continue;
           }
+          // 완료 게이트: 편집이 있었고 verifyCommand 가 설정돼 있으면, '작업 완료' 선언
+          // 전에 빌드/테스트를 강제로 돌린다. 실패하면 결과를 되먹여 계속 작업하게 한다(최대 3회).
+          const verifyCmd = cfg.get<string>("verifyCommand", "").trim();
+          const shell = this.getShell();
+          if (
+            withTools &&
+            verifyCmd &&
+            shell &&
+            editedThisRun &&
+            verifyRetries < 3 &&
+            declaresCompletion(answer) &&
+            !this.abort?.signal.aborted
+          ) {
+            this.post({
+              type: "tool",
+              name: "Verify",
+              detail: `Verifying before completion: ${verifyCmd}`,
+            });
+            const timeoutMs = cfg.get<number>("commandTimeout", 60000);
+            let vr;
+            try {
+              vr = await shell.run(verifyCmd, timeoutMs);
+            } catch {
+              vr = undefined;
+            }
+            if (vr && vr.code !== 0) {
+              verifyRetries++;
+              this.history.push({ role: "assistant", content: answer });
+              this.post({
+                type: "toolResult",
+                name: "Verify",
+                ok: false,
+                preview: `verify failed (exit ${vr.code ?? "?"}${
+                  vr.timedOut ? ", timeout" : ""
+                }) — continuing (${verifyRetries}/3)`,
+                output: vr.output.slice(0, 4000),
+              });
+              this.history.push({
+                role: "user",
+                content:
+                  `The verify command \`${verifyCmd}\` FAILED (exit code ${
+                    vr.code ?? "unknown"
+                  }${vr.timedOut ? ", timed out" : ""}), so the task is NOT complete. ` +
+                  `Fix the problems and do not declare completion until it passes.\n\n` +
+                  `[verify output]\n${vr.output.slice(0, 8000)}`,
+                hidden: true,
+              });
+              continue;
+            }
+            if (vr) {
+              this.post({
+                type: "toolResult",
+                name: "Verify",
+                ok: true,
+                preview: `verify passed (${verifyCmd})`,
+              });
+            }
+          } else if (
+            withTools &&
+            verifyCmd &&
+            shell &&
+            editedThisRun &&
+            verifyRetries >= 3 &&
+            declaresCompletion(answer)
+          ) {
+            // 검증이 3회 내내 실패 → 무한루프 방지를 위해 완료는 허용하되 사용자에게 명확히 경고
+            this.post({
+              type: "system",
+              text: `⚠️ Verify command \`${verifyCmd}\` still failing after 3 attempts — accepting completion anyway. Please review manually.`,
+            });
+          }
           if (answer) {
             this.history.push({ role: "assistant", content: answer });
           }
@@ -2567,6 +2641,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           )
         );
         if (editedPaths.length) {
+          editedThisRun = true; // 완료 게이트: 편집이 있었으므로 완료 선언 전 검증 필요
           for (const p of editedPaths) {
             try {
               // 닫힌 파일도 언어 서버가 분석하도록 유도한 뒤 진단 수집
