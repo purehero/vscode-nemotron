@@ -42,6 +42,8 @@ const API_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 function httpError(status: number, headers: Headers, detail: string): Error {
   const e = new Error(`HTTP ${status} — ${detail.slice(0, 500)}`);
   (e as any).status = status;
+  (e as any).headers = Object.fromEntries(headers.entries()); // 진단용 전체 응답 헤더
+  (e as any).body = detail; // 진단용 전체 응답 본문
   const ra = headers.get("retry-after");
   if (ra) {
     const secs = Number(ra);
