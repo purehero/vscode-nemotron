@@ -740,29 +740,53 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       messages.push({ role: "system", content: sys });
     }
 
-    // ⑧ 컨텍스트 길이 관리: 최신 턴부터 예산 안에서 채우고 오래된 턴은 생략
+    // ⑧ 컨텍스트 길이 관리:
+    // 사용자 요청·최종 응답(visible 턴)에 예산을 먼저 배정한 뒤, 남은 예산으로
+    // 최신 도구 결과(hidden 턴)를 원문 그대로 채운다. 이렇게 하면 도구 출력이
+    // 아무리 커도 "무슨 문제를 고쳐달라고 했는지" 같은 실제 대화가 밀려나지 않고,
+    // 진행 중인 작업의 최신 도구 맥락도 그대로 유지된다.
     const budget = vscode.workspace
       .getConfiguration("nemotron")
-      .get<number>("maxContextChars", 120000);
-    const kept: ChatMessage[] = [];
+      .get<number>("maxContextChars", 600000);
+    const keepIdx = new Set<number>();
     let acc = 0;
+    // 1) visible(사용자·최종 응답) 턴을 최신부터 예산 안에서 확보
     for (let i = this.history.length - 1; i >= 0; i--) {
       const t = this.history[i];
-      if (kept.length > 0 && acc + t.content.length > budget) {
-        break;
+      if (t.hidden) {
+        continue;
+      }
+      if (keepIdx.size > 0 && acc + t.content.length > budget) {
+        continue;
       }
       acc += t.content.length;
-      kept.unshift({ role: t.role, content: t.content });
+      keepIdx.add(i);
     }
-    if (kept.length < this.history.length) {
+    // 2) 남은 예산으로 hidden(도구) 턴을 최신부터 확보 (원문 유지)
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const t = this.history[i];
+      if (!t.hidden) {
+        continue;
+      }
+      if (acc + t.content.length > budget) {
+        continue;
+      }
+      acc += t.content.length;
+      keepIdx.add(i);
+    }
+    // 3) 원래 시간순으로 재조립
+    const omitted = this.history.length - keepIdx.size;
+    if (omitted > 0) {
       messages.push({
         role: "user",
-        content: `[Notice] The conversation is long, so the previous ${
-          this.history.length - kept.length
-        } messages were omitted. Re-check any needed content from the files.`,
+        content: `[Notice] The conversation is long, so ${omitted} older message(s) (mostly tool outputs) were omitted. Re-read any needed content from the files.`,
       });
     }
-    messages.push(...kept);
+    for (let i = 0; i < this.history.length; i++) {
+      if (keepIdx.has(i)) {
+        messages.push({ role: this.history[i].role, content: this.history[i].content });
+      }
+    }
     return messages;
   }
 
