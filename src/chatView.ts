@@ -101,6 +101,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   // API 요청 속도 제한 (RPM)
   private readonly limiter = new RateLimiter();
 
+  // 진단용 출력 채널 (오류 시 응답 상태·헤더·본문 기록)
+  private output?: vscode.OutputChannel;
+
   // 마지막 활성 텍스트 편집기 (웹뷰에 포커스가 있으면 activeTextEditor 가 비므로 기억해 둔다)
   private lastEditor?: vscode.TextEditor;
 
@@ -169,6 +172,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
       );
     });
+  }
+
+  /** 진단용 출력 채널 (지연 생성). "Nemotron" 이름으로 Output 패널에 나타난다. */
+  private out(): vscode.OutputChannel {
+    if (!this.output) {
+      this.output = vscode.window.createOutputChannel("Nemotron");
+    }
+    return this.output;
+  }
+
+  /**
+   * API 호출 오류의 상세 정보(상태코드·Retry-After·응답 헤더 전체·본문)를
+   * 출력 채널에 기록한다. 429/TPM 진단이나 숨은 헤더 확인에 쓴다.
+   */
+  private logApiError(context: string, model: string, err: any): void {
+    const ch = this.out();
+    ch.appendLine(`\n===== API error @ ${new Date().toISOString()} =====`);
+    ch.appendLine(`context : ${context}`);
+    ch.appendLine(`model   : ${model}`);
+    if (err?.status !== undefined) {
+      ch.appendLine(`status  : ${err.status}`);
+    }
+    if (typeof err?.retryAfterMs === "number") {
+      ch.appendLine(`retry-after : ${err.retryAfterMs} ms`);
+    }
+    if (err?.headers && typeof err.headers === "object") {
+      ch.appendLine("response headers :");
+      for (const [k, v] of Object.entries(err.headers)) {
+        ch.appendLine(`  ${k}: ${v}`);
+      }
+    }
+    const body = err?.body ?? err?.message ?? String(err);
+    const text = typeof body === "string" ? body : JSON.stringify(body);
+    ch.appendLine(`body :\n  ${text.slice(0, 4000)}`);
   }
 
   private getShell(): PersistentShell | undefined {
@@ -1212,6 +1249,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (err?.name === "AbortError") {
         return { ok: false, output: "sub-agent execution was stopped.", preview: "stopped" };
       }
+      this.logApiError(`sub-agent ${agent.name}`, agent.model, err);
       return {
         ok: false,
         output: `sub-agent '${agent.name}' (${agent.model}) call failed: ${String(err?.message ?? err)}`,
@@ -1449,6 +1487,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (err?.name === "AbortError") {
         return { ok: false, output: "Screen analysis was stopped.", preview: "stopped" };
       }
+      this.logApiError("capture_screen vision", model, err);
       return {
         ok: false,
         output:
@@ -1549,6 +1588,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (err?.name === "AbortError") {
         return { ok: false, output: "Image analysis was stopped.", preview: "stopped" };
       }
+      this.logApiError("analyze_image vision", model, err);
       return {
         ok: false,
         output:
@@ -2264,6 +2304,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             }
             break; // 스트림 정상 완료
           } catch (err: any) {
+            if (err?.name !== "AbortError") {
+              this.logApiError("main chat", this.params().model, err);
+              (err as any)._logged = true;
+            }
             const status = err?.status;
             const temporary = status === 429 || status === 503 || status === 500;
             // 이미 내용이 출력된 뒤의 실패는 재시도 시 중복되므로 제외한다.
@@ -2572,8 +2616,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.post({ type: "botEnd" });
         this.post({ type: "system", text: "⏹ Generation stopped." });
       } else {
+        if (!err?._logged) {
+          this.logApiError("chat", this.params().model, err);
+        }
+        this.out().show(true); // 오류 시 진단 로그를 자동으로 띄움(포커스는 뺏지 않음)
         this.post({ type: "botEnd" });
-        this.post({ type: "error", text: String(err?.message ?? err) });
+        this.post({
+          type: "error",
+          text: String(err?.message ?? err) + " — 자세한 내용: Output 패널 → Nemotron",
+        });
       }
     } finally {
       this.busy = false;
