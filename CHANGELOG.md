@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Long-term memory: the AI can save lessons, preferences, and project
+  conventions across sessions with the `remember`, `update_memory`, and
+  `forget` tools. Saved memories (`.nemotron/memory/`) are auto-injected into
+  the prompt so it stops repeating the same mistakes. Toggle with
+  `nemotron.enableMemory`; cap injection with `nemotron.maxMemoryChars`.
+
+### Changed
+
+- The chat view now registers itself in the right-hand Secondary Side Bar
+  declaratively (`viewsContainers.secondarySidebar`, like Claude Code) instead
+  of moving itself at runtime. Requires VSCode 1.106+.
+
 ## [0.2.1] - 2026-07-16
 
 Initial public release.
