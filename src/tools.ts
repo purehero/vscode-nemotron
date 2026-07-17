@@ -46,6 +46,7 @@ export const TOOL_NAMES = [
   "update_memory",
   "forget",
   "capture_screen",
+  "analyze_image",
 ] as const;
 
 /** sub-agent 정의 (설정 nemotron.agents) */
@@ -654,6 +655,65 @@ export const CAPTURE_INSTRUCTION = [
 ].join("\n");
 
 /**
+ * 기존 이미지 파일을 비전 분석용으로 준비한다.
+ * macOS 에서 파일이 크면 sips 로 최대 변 1024px·JPEG 품질 60 으로 줄여
+ * .nemotron/screenshots 에 임시 저장하고 그 상대경로를 돌려준다.
+ * 축소가 불필요하거나(작음) 불가능하면(비 macOS·sips 실패) 원본 경로를 그대로 돌려준다.
+ */
+export async function prepareImageForVision(
+  relPath: string,
+  stamp: number
+): Promise<{ path: string; note: string }> {
+  const srcUri = safeUri(relPath); // 워크스페이스 밖 경로 차단 + 존재 확인
+  const stat = await vscode.workspace.fs.stat(srcUri);
+  const SMALL = 700_000; // ~0.7MB 이하는 base64 후에도 비전 API 한도 내라 원본 사용
+  if (stat.size <= SMALL) {
+    return { path: relPath, note: "" };
+  }
+  if (process.platform !== "darwin") {
+    return {
+      path: relPath,
+      note: "(large image sent as-is; automatic resize is macOS-only) ",
+    };
+  }
+  const dirRel = ".nemotron/screenshots";
+  await vscode.workspace.fs.createDirectory(safeUri(dirRel));
+  const outRel = `${dirRel}/img_${stamp}.jpg`;
+  const outAbs = safeUri(outRel).fsPath;
+  const sips = await runExe(
+    "/usr/bin/sips",
+    [
+      "-s", "format", "jpeg",
+      "-Z", "1024",
+      "-s", "formatOptions", "60",
+      srcUri.fsPath, "--out", outAbs,
+    ],
+    workspaceRoot().fsPath,
+    15000
+  );
+  if (sips.code === 0) {
+    return { path: outRel, note: "(resized for vision) " };
+  }
+  return { path: relPath, note: "(resize failed; sending the original image) " };
+}
+
+/** analyze_image 도구 사용 안내 (비전 기능이 켜졌을 때 system prompt 에 덧붙임). */
+export const ANALYZE_INSTRUCTION = [
+  "",
+  "Image file analysis (vision):",
+  "- Use analyze_image to analyze an existing image file in the workspace (screenshots, diagrams, UI mockups, photos). It sends the image to a vision model and returns a TEXT description.",
+  "- key: path (workspace-relative path to the image, e.g. .nemotron/screenshots/shot_123.jpg or docs/mockup.png). Put what to look for in a <<<TASK ... <<<END block.",
+  "",
+  "```tool",
+  "analyze_image",
+  "path: docs/mockup.png",
+  "<<<TASK",
+  "What UI elements are shown? Describe the layout and any visible text.",
+  "<<<END",
+  "```",
+].join("\n");
+
+/**
  * GDScript 파일을 godot CLI 로 문법 검사한다 (Godot 에디터 LSP 폴백).
  * godot 을 찾지 못하면 null.
  */
@@ -985,6 +1045,11 @@ export interface ToolContext {
   /** 화면 캡쳐 + 비전 분석 (capture_screen 도구). */
   captureScreen?: (
     app: string | undefined,
+    question: string
+  ) => Promise<{ ok: boolean; output: string; preview: string }>;
+  /** 기존 이미지 파일 비전 분석 (analyze_image 도구). */
+  analyzeImage?: (
+    path: string,
     question: string
   ) => Promise<{ ok: boolean; output: string; preview: string }>;
 }
@@ -1696,6 +1761,30 @@ export async function runTool(call: ToolCall, ctx: ToolContext): Promise<ToolRes
           String(call.args?.task ?? "").trim() ||
           "Describe what is shown on this screen in detail, including any errors, dialogs, or layout issues.";
         const r = await ctx.captureScreen(app, question);
+        return { name: call.name, ok: r.ok, output: r.output, preview: r.preview };
+      }
+      case "analyze_image": {
+        if (!ctx.analyzeImage) {
+          return {
+            name: call.name,
+            ok: false,
+            output: "Image analysis is not available in this environment.",
+            preview: "unsupported",
+          };
+        }
+        const path = String(call.args?.path ?? "").trim();
+        if (!path) {
+          return {
+            name: call.name,
+            ok: false,
+            output: "analyze_image requires a 'path' (workspace-relative image file).",
+            preview: "no path",
+          };
+        }
+        const question =
+          String(call.args?.task ?? "").trim() ||
+          "Describe this image in detail, including any text, UI elements, errors, or layout issues.";
+        const r = await ctx.analyzeImage(path, question);
         return { name: call.name, ok: r.ok, output: r.output, preview: r.preview };
       }
       default:
