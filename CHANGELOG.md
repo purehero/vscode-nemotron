@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Screen capture + vision (macOS): the AI can capture a specific app's window
+  with the `capture_screen` tool (target by app name, or the full screen),
+  send it to an NVIDIA vision model (`nemotron.visionModel`), and get back a
+  text analysis — useful for verifying GUI/layout/visual bugs. Gated by
+  `nemotron.enableScreenCapture`; requires VS Code Screen Recording (and
+  Accessibility, for per-app capture) permission.
+- Automatic retry for transient/signal tool failures: `run_command` calls that
+  die from a signal (e.g. SIGKILL/SIGTERM/SIGSEGV) or a crashed shell are
+  retried (up to 2×, with backoff), instead of failing immediately. Common on
+  macOS.
 - Long-term memory: the AI can save lessons, preferences, and project
   conventions across sessions with the `remember`, `update_memory`, and
   `forget` tools. Saved memories (`.nemotron/memory/`) are auto-injected into

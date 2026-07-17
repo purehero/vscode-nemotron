@@ -36,6 +36,55 @@ export interface StreamEvent {
 const API_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 
 /**
+ * 비전 모델에 이미지 1장 + 질문을 보내 텍스트 분석을 받는다 (비스트리밍).
+ * capture_screen 도구가 사용한다. imageDataUrl 은 "data:image/jpeg;base64,..." 형식.
+ */
+export async function visionComplete(
+  apiKey: string,
+  model: string,
+  imageDataUrl: string,
+  question: string,
+  maxTokens: number,
+  signal: AbortSignal
+): Promise<string> {
+  const resp = await fetch(API_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: question },
+            { type: "image_url", image_url: { url: imageDataUrl } },
+          ],
+        },
+      ],
+      max_tokens: maxTokens,
+      temperature: 0.2,
+      stream: false,
+    }),
+    signal,
+  });
+  if (!resp.ok) {
+    let detail = "";
+    try {
+      detail = await resp.text();
+    } catch {
+      /* ignore */
+    }
+    throw new Error(`HTTP ${resp.status} — ${detail.slice(0, 500)}`);
+  }
+  const json: any = await resp.json();
+  return json?.choices?.[0]?.message?.content ?? "";
+}
+
+/**
  * Nemotron chat completions 를 스트리밍한다.
  * reasoning_content / content 를 구분해 이벤트로 방출한다.
  */

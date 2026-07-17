@@ -45,6 +45,7 @@ export const TOOL_NAMES = [
   "remember",
   "update_memory",
   "forget",
+  "capture_screen",
 ] as const;
 
 /** sub-agent 정의 (설정 nemotron.agents) */
@@ -558,6 +559,101 @@ function runExe(
 }
 
 /**
+ * macOS: 지정한 앱의 앞 창(app 미지정 시 전체 화면)을 캡쳐해 축소된 JPEG 로 저장한다.
+ * 비전 API 페이로드 한도를 고려해 sips 로 최대 변 1024px·JPEG 품질 60 으로 줄인다.
+ * 워크스페이스 상대경로와 참고 메모를 돌려준다.
+ */
+export async function captureAppScreenshot(
+  app: string | undefined,
+  stamp: number
+): Promise<{ path: string; note: string }> {
+  if (process.platform !== "darwin") {
+    throw new Error("Screen capture is currently supported on macOS only.");
+  }
+  const cwd = workspaceRoot().fsPath;
+  const dirRel = ".nemotron/screenshots";
+  await vscode.workspace.fs.createDirectory(safeUri(dirRel));
+  const rawRel = `${dirRel}/shot_${stamp}.png`;
+  const outRel = `${dirRel}/shot_${stamp}.jpg`;
+  const rawAbs = safeUri(rawRel).fsPath;
+  const outAbs = safeUri(outRel).fsPath;
+
+  let note = "";
+  const capArgs = ["-x"]; // -x: 캡쳐음 없음
+  if (app) {
+    // 대상 앱을 앞으로 가져온다
+    await runExe(
+      "/usr/bin/osascript",
+      ["-e", `tell application "${app}" to activate`],
+      cwd,
+      8000
+    );
+    await new Promise((r) => setTimeout(r, 500));
+    // 앞 창의 위치/크기 (Accessibility 권한 필요)
+    const b = await runExe(
+      "/usr/bin/osascript",
+      [
+        "-e",
+        `tell application "System Events" to tell process "${app}" to get {position, size} of front window`,
+      ],
+      cwd,
+      8000
+    );
+    const nums = (b.output.match(/-?\d+/g) || []).map(Number);
+    if (b.code === 0 && nums.length >= 4) {
+      const [x, y, w, h] = nums;
+      capArgs.push(`-R${x},${y},${w},${h}`);
+    } else {
+      note =
+        `Could not read the "${app}" window bounds (grant Accessibility permission to VS Code); ` +
+        "captured the full screen instead. ";
+    }
+  }
+  capArgs.push(rawAbs);
+  const cap = await runExe("/usr/sbin/screencapture", capArgs, cwd, 15000);
+  if (cap.code !== 0) {
+    throw new Error(
+      "screencapture failed" +
+        (cap.output.trim() ? ": " + cap.output.trim() : "") +
+        ". Grant Screen Recording permission to VS Code in System Settings › Privacy & Security."
+    );
+  }
+  // 축소 + JPEG 변환. 실패하면 원본 PNG 를 그대로 사용한다.
+  const sips = await runExe(
+    "/usr/bin/sips",
+    [
+      "-s", "format", "jpeg",
+      "-Z", "1024",
+      "-s", "formatOptions", "60",
+      rawAbs, "--out", outAbs,
+    ],
+    cwd,
+    15000
+  );
+  if (sips.code === 0) {
+    return { path: outRel, note };
+  }
+  return { path: rawRel, note: note + "(sips resize failed; using full-size PNG) " };
+}
+
+/** capture_screen 도구 사용 안내 (설정에서 켜졌을 때만 system prompt 에 덧붙임). */
+export const CAPTURE_INSTRUCTION = [
+  "",
+  "Screen capture + vision (macOS):",
+  "- Use capture_screen to see a running app's GUI. It captures the app window, sends it to a vision model, and returns a TEXT description — use it to verify UI/layout/visual bugs you cannot check from code alone.",
+  "- key: app (the application name, e.g. Godot, Safari; omit to capture the full screen). Put what to look for in a <<<TASK ... <<<END block.",
+  "- Capturing may ask the user for permission and requires macOS Screen Recording/Accessibility permission for VS Code.",
+  "",
+  "```tool",
+  "capture_screen",
+  "app: Godot",
+  "<<<TASK",
+  "Is the player sprite visible and centered? Report any error dialogs or misaligned UI.",
+  "<<<END",
+  "```",
+].join("\n");
+
+/**
  * GDScript 파일을 godot CLI 로 문법 검사한다 (Godot 에디터 LSP 폴백).
  * godot 을 찾지 못하면 null.
  */
@@ -886,6 +982,11 @@ export interface ToolContext {
   ) => Promise<{ ok: boolean; output: string; preview: string }>;
   /** 작업 계획 갱신 (update_plan 도구). */
   updatePlan?: (items: { text: string; done: boolean }[]) => void;
+  /** 화면 캡쳐 + 비전 분석 (capture_screen 도구). */
+  captureScreen?: (
+    app: string | undefined,
+    question: string
+  ) => Promise<{ ok: boolean; output: string; preview: string }>;
 }
 
 /** 워크스페이스에서 셸 명령을 실행하고 출력을 캡처한다. */
@@ -1580,6 +1681,22 @@ export async function runTool(call: ToolCall, ctx: ToolContext): Promise<ToolRes
           output: `Memory forgotten (id ${id}).`,
           preview: `🧠 forgot (${id})`,
         };
+      }
+      case "capture_screen": {
+        if (!ctx.captureScreen) {
+          return {
+            name: call.name,
+            ok: false,
+            output: "Screen capture is not available in this environment.",
+            preview: "unsupported",
+          };
+        }
+        const app = String(call.args?.app ?? "").trim() || undefined;
+        const question =
+          String(call.args?.task ?? "").trim() ||
+          "Describe what is shown on this screen in detail, including any errors, dialogs, or layout issues.";
+        const r = await ctx.captureScreen(app, question);
+        return { name: call.name, ok: r.ok, output: r.output, preview: r.preview };
       }
       default:
         return {
