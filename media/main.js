@@ -456,6 +456,9 @@
   });
 
   promptEl.addEventListener("keydown", (e) => {
+    // IME(한글/일본어/중국어 등) 조합 중에는 Enter 가 '조합 확정'이므로 여기서
+    // 가로채면 안 된다. 조합 중 Enter 를 send 로 처리하면 마지막 글자가 중복 입력된다.
+    if (e.isComposing || e.keyCode === 229) return;
     if (slashOpen) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
