@@ -281,8 +281,8 @@
         },
         "nemotron.summarizeModel": {
           "type": "string",
-          "default": "",
-          "description": "Model used to summarize old tool outputs (only when nemotron.summarizeToolResults is on). Leave empty to reuse nemotron.model; set a smaller/cheaper model (e.g. a Nemotron Nano) to reduce cost"
+          "default": "nvidia/llama-3.1-nemotron-nano-8b-v1",
+          "description": "Model used to summarize old tool outputs (only when nemotron.summarizeToolResults is on). Defaults to a small/cheap Nemotron Nano so summarization doesn't run on the expensive main model. Leave empty to reuse nemotron.model instead"
         },
         "nemotron.agents": {
           "type": "array",
