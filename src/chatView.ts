@@ -2200,48 +2200,93 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     try {
       for (let iter = 0; ; iter++) {
-        // 요청 속도 제한 (기본 40 RPM)
-        const maxRpm = vscode.workspace
-          .getConfiguration("nemotron")
-          .get<number>("maxRpm", 40);
-        await this.limiter.acquire(maxRpm, {
-          signal: this.abort.signal,
-          onWait: (ms) =>
-            this.post({
-              type: "system",
-              text: `⏳ Rate limit (${maxRpm} RPM) — waiting about ${Math.ceil(
-                ms / 1000
-              )}s…`,
-            }),
-        });
+        // 요청 속도 제한 (기본 40 RPM) + 429/503/500 백오프 재시도
+        const cfg = vscode.workspace.getConfiguration("nemotron");
+        const maxRpm = cfg.get<number>("maxRpm", 40);
+        const maxRetries = Math.max(0, cfg.get<number>("maxRetries", 3));
 
-        this.liveAnswer = "";
-        this.liveReasoning = "";
-        this.post({ type: "botStart" });
         let answer = "";
         let finishReason = "";
+        // 429(속도제한)·503/500(일시적 과부하)은 백오프 후 자동 재시도한다.
+        // 이들은 스트림이 시작되기 전에 던져지므로, 아직 출력이 없을 때만 재시도해
+        // 이미 표시된 내용이 중복되지 않게 한다. 재시도 요청도 limiter 를 통과한다.
+        for (let sAttempt = 0; ; sAttempt++) {
+          await this.limiter.acquire(maxRpm, {
+            signal: this.abort.signal,
+            onWait: (ms) =>
+              this.post({
+                type: "system",
+                text: `⏳ Rate limit (${maxRpm} RPM) — waiting about ${Math.ceil(
+                  ms / 1000
+                )}s…`,
+              }),
+          });
 
-        for await (const ev of streamChat(
-          key,
-          this.buildMessages(withTools),
-          this.params(),
-          this.abort.signal
-        )) {
-          if (ev.type === "usage" && ev.usage) {
-            this.usage.prompt += ev.usage.prompt;
-            this.usage.completion += ev.usage.completion;
-            this.usage.total += ev.usage.total;
-            this.usage.requests += 1;
-            this.lastUsage = ev.usage;
-          } else if (ev.type === "reasoning") {
-            this.liveReasoning += ev.text ?? "";
-            this.post({ type: "reasoning", text: ev.text });
-          } else if (ev.type === "content") {
-            answer += ev.text ?? "";
-            this.liveAnswer = answer;
-            this.post({ type: "content", text: ev.text });
-          } else if (ev.type === "finish") {
-            finishReason = ev.finishReason ?? finishReason;
+          this.liveAnswer = "";
+          this.liveReasoning = "";
+          this.post({ type: "botStart" });
+          answer = "";
+          finishReason = "";
+
+          try {
+            for await (const ev of streamChat(
+              key,
+              this.buildMessages(withTools),
+              this.params(),
+              this.abort.signal
+            )) {
+              if (ev.type === "usage" && ev.usage) {
+                this.usage.prompt += ev.usage.prompt;
+                this.usage.completion += ev.usage.completion;
+                this.usage.total += ev.usage.total;
+                this.usage.requests += 1;
+                this.lastUsage = ev.usage;
+              } else if (ev.type === "reasoning") {
+                this.liveReasoning += ev.text ?? "";
+                this.post({ type: "reasoning", text: ev.text });
+              } else if (ev.type === "content") {
+                answer += ev.text ?? "";
+                this.liveAnswer = answer;
+                this.post({ type: "content", text: ev.text });
+              } else if (ev.type === "finish") {
+                finishReason = ev.finishReason ?? finishReason;
+              }
+            }
+            break; // 스트림 정상 완료
+          } catch (err: any) {
+            const status = err?.status;
+            const temporary = status === 429 || status === 503 || status === 500;
+            // 이미 내용이 출력된 뒤의 실패는 재시도 시 중복되므로 제외한다.
+            const retryable =
+              temporary &&
+              answer === "" &&
+              sAttempt < maxRetries &&
+              err?.name !== "AbortError" &&
+              !this.abort.signal.aborted;
+            if (!retryable) {
+              throw err;
+            }
+            this.post({ type: "dropLastBot" });
+            const backoff =
+              typeof err?.retryAfterMs === "number"
+                ? err.retryAfterMs
+                : Math.min(30_000, 1000 * 2 ** sAttempt); // 1s,2s,4s,… (최대 30s)
+            this.post({
+              type: "system",
+              text: `⏳ HTTP ${status} (rate limited) — retrying in ${Math.ceil(
+                backoff / 1000
+              )}s (${sAttempt + 1}/${maxRetries})`,
+            });
+            await this.raceAbort(
+              new Promise<string>((r) => setTimeout(() => r("ok"), backoff)),
+              "aborted"
+            );
+            if (this.abort.signal.aborted) {
+              const e = new Error("Aborted");
+              e.name = "AbortError";
+              throw e;
+            }
+            // 다음 시도로 계속
           }
         }
         this.post({ type: "botEnd" });
