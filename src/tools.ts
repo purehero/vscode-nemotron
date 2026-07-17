@@ -20,6 +20,12 @@ export interface ToolResult {
   output: string;
   /** UI 표시용 짧은 미리보기 */
   preview: string;
+  /**
+   * 일시적/시그널성 실패라 그대로 재시도하면 성공할 수 있음.
+   * (예: 명령이 시그널로 종료, 지속 셸 프로세스가 죽음, spawn 자원 부족)
+   * edit 매칭 실패·일반 non-zero 종료·사용자 거부 등 결정적 실패에는 설정하지 않는다.
+   */
+  retryable?: boolean;
 }
 
 export const TOOL_NAMES = [
@@ -887,7 +893,7 @@ function runShell(
   command: string,
   cwd: string,
   timeoutMs: number
-): Promise<{ code: number | null; output: string; timedOut: boolean }> {
+): Promise<{ code: number | null; output: string; timedOut: boolean; crashed?: boolean }> {
   return new Promise((resolve) => {
     const sh = detectShell();
     const child =
@@ -923,11 +929,24 @@ function runShell(
     }, timeoutMs);
     child.on("error", (e) => {
       clearTimeout(timer);
-      resolve({ code: null, output: output + "\nExecution error: " + e.message, timedOut });
+      // spawn 실패(EAGAIN 등 자원 부족) — 일시적일 수 있어 재시도 대상
+      resolve({
+        code: null,
+        output: output + "\nExecution error: " + e.message,
+        timedOut,
+        crashed: true,
+      });
     });
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       clearTimeout(timer);
-      resolve({ code, output, timedOut });
+      // 시그널로 종료됐고 우리가 (타임아웃/폭주로) 죽인 게 아니면 재시도 대상
+      const crashed = !!signal && !timedOut && !killed;
+      resolve({
+        code,
+        output: signal ? output + `\n(terminated by signal ${signal})` : output,
+        timedOut,
+        crashed,
+      });
     });
   });
 }
@@ -1243,14 +1262,25 @@ export async function runTool(call: ToolCall, ctx: ToolContext): Promise<ToolRes
         const res = usePersistent
           ? await ctx.shell!.run(command, timeoutMs)
           : await runShell(command, cwd, timeoutMs);
+        // 시그널성/일시적 실패 판정: 셸이 죽음(crashed), 또는 명령이 시그널로
+        // 종료(bash $? = 128+signum)됐고 타임아웃이 아닌 경우 → 재시도 대상.
+        // 일반 non-zero 종료(테스트 실패·컴파일 오류 등)는 재시도해도 소용없어 제외.
+        const killedBySignal =
+          !res.timedOut && res.code !== null && res.code > 128 && res.code < 192;
+        const retryable = !!res.crashed || killedBySignal;
         const status = res.timedOut
           ? `stopped by timeout (${timeoutMs}ms)${usePersistent ? " (shell restarted)" : ""}`
-          : `exit code ${res.code}`;
+          : res.crashed
+            ? "shell terminated (signal?)"
+            : killedBySignal
+              ? `killed by signal (exit ${res.code})`
+              : `exit code ${res.code}`;
         return {
           name: call.name,
           ok: res.code === 0 && !res.timedOut,
           output: `$ ${command}\n[${status}]\n${res.output || "(no output)"}`,
           preview: `${command}  →  ${status}`,
+          retryable,
         };
       }
       case "get_diagnostics": {

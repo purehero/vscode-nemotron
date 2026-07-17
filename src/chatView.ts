@@ -5,6 +5,8 @@ import {
   parseToolCalls,
   hasToolAttempt,
   runTool,
+  ToolCall,
+  ToolContext,
   ToolResult,
   formatDiagnostics,
   ensureAnalyzed,
@@ -2054,7 +2056,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             name: call.name,
             detail: this.argSummary(call.name, call.args),
           });
-          const res = await runTool(call, {
+          const res = await this.runToolWithRetry(call, {
             confirmWrite: (p, s, proposed) => this.confirmWrite(p, s, proposed),
             confirmCommand: (c) => this.confirmCommand(c),
             recordBackup: (p, bytes) => this.recordBackup(p, bytes),
@@ -2155,6 +2157,50 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.abort = undefined;
       this.post({ type: "busy", value: false });
       void this.autoSaveSession(); // 세션 자동 저장
+    }
+  }
+
+  /**
+   * 도구를 실행하되, 일시적/시그널성 실패(res.retryable)나 예외가 나면 자동 재시도한다.
+   * (macOS 등에서 run_command 가 시그널로 종료되거나 셸이 죽는 경우가 있음)
+   * edit 매칭 실패·일반 non-zero 종료·사용자 거부 등 결정적 실패는 재시도하지 않는다.
+   */
+  private async runToolWithRetry(
+    call: ToolCall,
+    ctx: ToolContext,
+    maxRetries = 2
+  ): Promise<ToolResult> {
+    for (let attempt = 0; ; attempt++) {
+      let res: ToolResult;
+      try {
+        res = await runTool(call, ctx);
+      } catch (e: any) {
+        const msg = "Error: " + String(e?.message ?? e);
+        res = {
+          name: call.name,
+          ok: false,
+          output: msg,
+          preview: msg,
+          retryable: true, // 예외는 대체로 일시적 — 재시도 대상
+        };
+      }
+      const canRetry =
+        res.retryable === true &&
+        attempt < maxRetries &&
+        !this.abort?.signal.aborted;
+      if (!canRetry) {
+        return res;
+      }
+      this.post({
+        type: "tool",
+        name: "Retry",
+        detail: `${call.name}: transient/signal failure — retrying (${attempt + 1}/${maxRetries})`,
+      });
+      // 점증 백오프 (중지 ■ 버튼으로 즉시 깨어날 수 있게 raceAbort)
+      await this.raceAbort(
+        new Promise<string>((r) => setTimeout(() => r("ok"), 500 * (attempt + 1))),
+        "aborted"
+      );
     }
   }
 
