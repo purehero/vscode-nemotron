@@ -1,5 +1,12 @@
 import * as vscode from "vscode";
-import { streamChat, ChatMessage, StreamParams, Role, Usage } from "./nemotron";
+import {
+  streamChat,
+  visionComplete,
+  ChatMessage,
+  StreamParams,
+  Role,
+  Usage,
+} from "./nemotron";
 import {
   TOOL_INSTRUCTION,
   parseToolCalls,
@@ -18,6 +25,8 @@ import {
   listMemories,
   formatMemoriesForPrompt,
   MEMORY_INSTRUCTION,
+  captureAppScreenshot,
+  CAPTURE_INSTRUCTION,
 } from "./tools";
 import { RateLimiter } from "./rateLimiter";
 import { PersistentShell } from "./shell";
@@ -697,15 +706,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     let sys = vscode.workspace
       .getConfiguration("nemotron")
       .get<string>("systemPrompt", "");
-    const memoryOn = vscode.workspace
-      .getConfiguration("nemotron")
-      .get<boolean>("enableMemory", true);
+    const nemoCfg = vscode.workspace.getConfiguration("nemotron");
+    const memoryOn = nemoCfg.get<boolean>("enableMemory", true);
+    const captureOn =
+      nemoCfg.get<boolean>("enableScreenCapture", true) && process.platform === "darwin";
     if (withTools) {
       sys =
         (sys ? sys + "\n\n" : "") +
         TOOL_INSTRUCTION +
         agentInstruction() +
-        (memoryOn ? MEMORY_INSTRUCTION : "");
+        (memoryOn ? MEMORY_INSTRUCTION : "") +
+        (captureOn ? CAPTURE_INSTRUCTION : "");
     }
     // ⑪ 프로젝트 지침(NEMOTRON.md) 자동 포함
     if (this.projectDoc) {
@@ -1179,6 +1190,115 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ok: false,
         output: `Image generation error: ${String(err?.message ?? err)}`,
         preview: `${agent.name} error`,
+      };
+    }
+  }
+
+  /** capture_screen 도구: 앱 창 캡쳐 → 비전 모델 분석 → 텍스트 결과 반환 */
+  private async captureScreen(
+    app: string | undefined,
+    question: string
+  ): Promise<{ ok: boolean; output: string; preview: string }> {
+    const cfg = vscode.workspace.getConfiguration("nemotron");
+    if (!cfg.get<boolean>("enableScreenCapture", true)) {
+      return {
+        ok: false,
+        output: "Screen capture is disabled (nemotron.enableScreenCapture).",
+        preview: "capture disabled",
+      };
+    }
+    // 개인정보 민감 — 자동 승인이 아니면 확인
+    const auto = this.isAutoMode() || cfg.get<boolean>("autoApproveCommands", false);
+    if (!auto) {
+      const target = app ? `the "${app}" window` : "the full screen";
+      const pick = await this.raceAbort(
+        Promise.resolve(
+          vscode.window.showWarningMessage(
+            `Allow Nemotron to capture ${target} and send it to the vision model?`,
+            "Capture",
+            "Deny"
+          )
+        ),
+        "Deny" as string | undefined
+      );
+      if (pick !== "Capture") {
+        return { ok: false, output: "The user denied the screen capture.", preview: "capture denied" };
+      }
+    }
+    const key = await this.getApiKey();
+    if (!key) {
+      return { ok: false, output: "No NVIDIA API key set.", preview: "no api key" };
+    }
+    const root = vscode.workspace.workspaceFolders?.[0];
+    if (!root) {
+      return { ok: false, output: "No open working folder.", preview: "no folder" };
+    }
+
+    let shot: { path: string; note: string };
+    try {
+      shot = await captureAppScreenshot(app, Date.now());
+    } catch (e: any) {
+      return {
+        ok: false,
+        output: "Capture failed: " + String(e?.message ?? e),
+        preview: "capture failed",
+      };
+    }
+
+    const uri = vscode.Uri.joinPath(root.uri, shot.path);
+    const bytes = await vscode.workspace.fs.readFile(uri);
+    const b64 = Buffer.from(bytes).toString("base64");
+    const mime = shot.path.endsWith(".png") ? "image/png" : "image/jpeg";
+    const dataUrl = `data:${mime};base64,${b64}`;
+
+    // 캡쳐 이미지를 옆 편집기에 표시
+    try {
+      await vscode.commands.executeCommand("vscode.open", uri, {
+        viewColumn: vscode.ViewColumn.Beside,
+        preview: true,
+      });
+    } catch {
+      /* 표시 실패는 무시 */
+    }
+
+    const model = cfg.get<string>("visionModel", "meta/llama-3.2-90b-vision-instruct");
+    const maxTokens = Math.min(cfg.get<number>("maxTokens", 16384), 4096);
+    const maxRpm = cfg.get<number>("maxRpm", 40);
+    try {
+      await this.limiter.acquire(maxRpm, { signal: this.abort?.signal });
+    } catch {
+      return { ok: false, output: "Stopped.", preview: "stopped" };
+    }
+    try {
+      const analysis = await visionComplete(
+        key,
+        model,
+        dataUrl,
+        question,
+        maxTokens,
+        this.abort!.signal
+      );
+      const bytesNote =
+        b64.length > 180_000
+          ? "\n(Note: the image is large; if the vision model rejected it, lower the capture resolution.)"
+          : "";
+      return {
+        ok: true,
+        output:
+          `${shot.note}Captured ${app ? `"${app}"` : "the screen"} → ${shot.path} (analyzed by ${model}).\n\n` +
+          `[Vision analysis]\n${analysis || "(empty response)"}${bytesNote}`,
+        preview: `📷 ${app ?? "screen"} analyzed`,
+      };
+    } catch (err: any) {
+      if (err?.name === "AbortError") {
+        return { ok: false, output: "Screen analysis was stopped.", preview: "stopped" };
+      }
+      return {
+        ok: false,
+        output:
+          `Saved the capture (${shot.path}) but vision analysis failed: ${String(err?.message ?? err)}. ` +
+          `Check that nemotron.visionModel ("${model}") is accessible with your API key.`,
+        preview: "vision failed",
       };
     }
   }
@@ -2066,6 +2186,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               this.plan = items;
               this.post({ type: "plan", items });
             },
+            captureScreen: (app, question) => this.captureScreen(app, question),
           });
           results.push(res);
           this.post({
@@ -2242,6 +2363,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     if (name === "update_memory" || name === "forget") {
       return String(args?.id ?? "");
+    }
+    if (name === "capture_screen") {
+      return args?.app ? String(args.app) : "full screen";
     }
     return "";
   }

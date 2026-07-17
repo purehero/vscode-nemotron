@@ -196,6 +196,16 @@
           "default": true,
           "description": "Long-term memory: let the AI save/recall lessons, preferences, and conventions across sessions (stored in .nemotron/memory) so it stops repeating the same mistakes"
         },
+        "nemotron.enableScreenCapture": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow the AI to capture a specific app's window (macOS) and analyze it with a vision model via the capture_screen tool. Requires Screen Recording (and Accessibility, for per-app capture) permission for VS Code"
+        },
+        "nemotron.visionModel": {
+          "type": "string",
+          "default": "meta/llama-3.2-90b-vision-instruct",
+          "description": "Vision-capable NVIDIA model used by the capture_screen tool to analyze screenshots. Must be a model your API key can access"
+        },
         "nemotron.maxMemoryChars": {
           "type": "number",
           "default": 8000,
