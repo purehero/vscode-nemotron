@@ -2,37 +2,12 @@ import * as vscode from "vscode";
 import { ChatViewProvider } from "./chatView";
 
 const SECRET_KEY = "nemotron.apiKey";
-const MOVED_KEY = "nemotron.movedToSecondarySideBar";
-
-/** 채팅 뷰를 우측 보조 사이드바(Secondary Side Bar)로 이동 */
-async function moveChatToSecondarySideBar(): Promise<void> {
-  // 뷰에 포커스를 준 뒤 '포커스된 뷰 이동' 명령 실행
-  await vscode.commands.executeCommand("nemotron.chatView.focus");
-  await new Promise((r) => setTimeout(r, 400));
-  await vscode.commands.executeCommand(
-    "workbench.action.moveViewToSecondarySideBar"
-  );
-}
 
 export function activate(context: vscode.ExtensionContext): void {
   const provider = new ChatViewProvider(context);
 
-  // 시작 시 마지막 세션 자동 복원 (nemotron.restoreLastSession)
-  void provider.restoreLastSession();
-
-  // 최초 1회: Claude Code 처럼 우측 보조 사이드바에 배치
-  // (이후 위치는 VSCode 가 기억하므로 다시 이동하지 않음)
-  if (!context.globalState.get<boolean>(MOVED_KEY)) {
-    void (async () => {
-      try {
-        await moveChatToSecondarySideBar();
-        await context.globalState.update(MOVED_KEY, true);
-      } catch {
-        /* 명령 미지원 등 — 좌측 사이드바로 유지 */
-      }
-    })();
-  }
-
+  // 뷰 컨테이너는 package.json 의 viewsContainers.secondarySidebar 로 선언되어
+  // Claude Code 처럼 우측 보조 사이드바에 자동 등록된다 (VSCode 1.106+).
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       ChatViewProvider.viewType,
@@ -40,6 +15,9 @@ export function activate(context: vscode.ExtensionContext): void {
       { webviewOptions: { retainContextWhenHidden: true } }
     )
   );
+
+  // 시작 시 마지막 세션 자동 복원 (nemotron.restoreLastSession)
+  void provider.restoreLastSession();
 
   context.subscriptions.push(
     vscode.commands.registerCommand("nemotron.setApiKey", async () => {
@@ -67,18 +45,6 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand("nemotron.showHistory", () => {
       void provider.showHistory();
-    }),
-
-    vscode.commands.registerCommand("nemotron.moveToSecondaryBar", async () => {
-      try {
-        await moveChatToSecondarySideBar();
-      } catch (e: any) {
-        vscode.window.showWarningMessage(
-          "Move failed: " +
-            String(e?.message ?? e) +
-            " — you can also drag the Nemotron icon to the secondary side bar."
-        );
-      }
     }),
 
     vscode.commands.registerCommand("nemotron.openInEditor", () => {
