@@ -4,11 +4,23 @@ import { ChatViewProvider } from "./chatView";
 const SECRET_KEY = "nemotron.apiKey";
 const MOVED_KEY = "nemotron.movedToSecondarySideBar";
 
-/** 채팅 뷰를 우측 보조 사이드바(Secondary Side Bar)로 이동 */
-async function moveChatToSecondarySideBar(): Promise<void> {
-  // 뷰에 포커스를 준 뒤 '포커스된 뷰 이동' 명령 실행
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 채팅 뷰를 우측 보조 사이드바(Secondary Side Bar)로 이동.
+ * 시작 시점에 웹뷰 로드가 늦어도 실패하지 않도록, 뷰가 실제로 resolve 될 때까지
+ * 기다린 뒤 포커스 → 이동 명령을 실행한다.
+ */
+async function moveChatToSecondarySideBar(
+  provider: ChatViewProvider
+): Promise<void> {
+  // 뷰에 포커스를 주면 아직 로드되지 않았던 웹뷰가 resolve 된다
   await vscode.commands.executeCommand("nemotron.chatView.focus");
-  await new Promise((r) => setTimeout(r, 400));
+  // 고정 대기 대신 뷰 로드 완료 신호를 기다린다 (최대 5초 안전장치)
+  await Promise.race([provider.whenViewResolved(), delay(5000)]);
+  // 워크벤치가 뷰 파트를 활성화할 여유를 준 뒤, 다시 포커스해 이동 대상을 확정
+  await delay(150);
+  await vscode.commands.executeCommand("nemotron.chatView.focus");
   await vscode.commands.executeCommand(
     "workbench.action.moveViewToSecondarySideBar"
   );
@@ -16,6 +28,15 @@ async function moveChatToSecondarySideBar(): Promise<void> {
 
 export function activate(context: vscode.ExtensionContext): void {
   const provider = new ChatViewProvider(context);
+
+  // 뷰 프로바이더를 먼저 등록해야 focus/이동 명령이 확실히 뷰를 resolve 한다
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      ChatViewProvider.viewType,
+      provider,
+      { webviewOptions: { retainContextWhenHidden: true } }
+    )
+  );
 
   // 시작 시 마지막 세션 자동 복원 (nemotron.restoreLastSession)
   void provider.restoreLastSession();
@@ -25,21 +46,13 @@ export function activate(context: vscode.ExtensionContext): void {
   if (!context.globalState.get<boolean>(MOVED_KEY)) {
     void (async () => {
       try {
-        await moveChatToSecondarySideBar();
+        await moveChatToSecondarySideBar(provider);
         await context.globalState.update(MOVED_KEY, true);
       } catch {
         /* 명령 미지원 등 — 좌측 사이드바로 유지 */
       }
     })();
   }
-
-  context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(
-      ChatViewProvider.viewType,
-      provider,
-      { webviewOptions: { retainContextWhenHidden: true } }
-    )
-  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("nemotron.setApiKey", async () => {
@@ -71,7 +84,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand("nemotron.moveToSecondaryBar", async () => {
       try {
-        await moveChatToSecondarySideBar();
+        await moveChatToSecondarySideBar(provider);
       } catch (e: any) {
         vscode.window.showWarningMessage(
           "Move failed: " +

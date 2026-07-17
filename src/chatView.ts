@@ -106,6 +106,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   // 세션 관리: 현재 세션 ID (자동 저장 파일명)
   private sessionId = `s${Date.now()}`;
 
+  // 사이드바 웹뷰가 최초 1회 resolve(로드) 되었는지 여부와 대기자 목록
+  // (우측 보조 사이드바 자동 배치 타이밍을 뷰 로드 완료에 맞추기 위함)
+  private viewResolved = false;
+  private resolveWaiters: (() => void)[] = [];
+
+  /** 사이드바 웹뷰가 resolve 될 때까지 대기 (이미 resolve 됐으면 즉시 반환) */
+  public whenViewResolved(): Promise<void> {
+    if (this.viewResolved) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => this.resolveWaiters.push(resolve));
+  }
+
   constructor(private readonly ctx: vscode.ExtensionContext) {
     this.lastEditor = vscode.window.activeTextEditor;
     ctx.subscriptions.push(
@@ -170,6 +183,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     view.webview.html = this.html(view.webview);
     const client = this.attach(view.webview, "primary");
     view.onDidDispose(() => this.clients.delete(client));
+
+    // 뷰가 실제로 로드됨 — 우측 보조 사이드바 자동 배치 대기자를 깨운다
+    this.viewResolved = true;
+    for (const wake of this.resolveWaiters.splice(0)) {
+      wake();
+    }
   }
 
   // ── 편집기 탭(별도 창으로 분리 가능)에서 열기 ──
