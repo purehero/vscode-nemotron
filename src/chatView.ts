@@ -76,6 +76,8 @@ interface Turn {
   role: Role;
   content: string;
   hidden?: boolean;
+  /** 오래된 도구 결과의 LLM 요약 캐시 (컨텍스트 전송 시 원문 대신 사용). content 원본은 보존. */
+  summary?: string;
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -745,33 +747,49 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // 최신 도구 결과(hidden 턴)를 원문 그대로 채운다. 이렇게 하면 도구 출력이
     // 아무리 커도 "무슨 문제를 고쳐달라고 했는지" 같은 실제 대화가 밀려나지 않고,
     // 진행 중인 작업의 최신 도구 맥락도 그대로 유지된다.
-    const budget = vscode.workspace
-      .getConfiguration("nemotron")
-      .get<number>("maxContextChars", 600000);
+    const budget = nemoCfg.get<number>("maxContextChars", 600000);
+    // 오래된 도구 결과는 요약/압축본으로 보낸다: 최신 N개만 원문 유지.
+    const fullCount = Math.max(0, nemoCfg.get<number>("toolResultFullCount", 3));
+    const toolIdx: number[] = [];
+    for (let i = 0; i < this.history.length; i++) {
+      if (this.isToolResultTurn(this.history[i])) {
+        toolIdx.push(i);
+      }
+    }
+    const fullSet = new Set(toolIdx.slice(toolIdx.length - fullCount));
+    // 컨텍스트로 실제 전송할 내용: 오래된 도구 결과는 요약(있으면)·없으면 규칙 압축.
+    const effContent = (i: number): string => {
+      const t = this.history[i];
+      if (this.isToolResultTurn(t) && !fullSet.has(i)) {
+        return t.summary ?? this.compactToolResult(t.content);
+      }
+      return t.content;
+    };
+
     const keepIdx = new Set<number>();
     let acc = 0;
     // 1) visible(사용자·최종 응답) 턴을 최신부터 예산 안에서 확보
     for (let i = this.history.length - 1; i >= 0; i--) {
-      const t = this.history[i];
-      if (t.hidden) {
+      if (this.history[i].hidden) {
         continue;
       }
-      if (keepIdx.size > 0 && acc + t.content.length > budget) {
+      const len = effContent(i).length;
+      if (keepIdx.size > 0 && acc + len > budget) {
         continue;
       }
-      acc += t.content.length;
+      acc += len;
       keepIdx.add(i);
     }
-    // 2) 남은 예산으로 hidden(도구) 턴을 최신부터 확보 (원문 유지)
+    // 2) 남은 예산으로 hidden(도구) 턴을 최신부터 확보 (오래된 것은 요약본 기준)
     for (let i = this.history.length - 1; i >= 0; i--) {
-      const t = this.history[i];
-      if (!t.hidden) {
+      if (!this.history[i].hidden) {
         continue;
       }
-      if (acc + t.content.length > budget) {
+      const len = effContent(i).length;
+      if (acc + len > budget) {
         continue;
       }
-      acc += t.content.length;
+      acc += len;
       keepIdx.add(i);
     }
     // 3) 원래 시간순으로 재조립
@@ -784,10 +802,109 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     for (let i = 0; i < this.history.length; i++) {
       if (keepIdx.has(i)) {
-        messages.push({ role: this.history[i].role, content: this.history[i].content });
+        messages.push({ role: this.history[i].role, content: effContent(i) });
       }
     }
     return messages;
+  }
+
+  /** 도구 결과 피드백 턴인지 판별 (숨김 user 턴이며 '[Tool ...' 로 시작). 지시성 숨김 턴은 제외. */
+  private isToolResultTurn(t: Turn): boolean {
+    return !!t.hidden && t.role === "user" && t.content.startsWith("[Tool ");
+  }
+
+  /** 규칙 기반 압축: 긴 도구 출력의 앞·뒤만 남기고 중간을 생략한다 (에러/종료코드는 주로 앞뒤에 있음). */
+  private compactToolResult(content: string): string {
+    const HEAD = 1600;
+    const TAIL = 800;
+    if (content.length <= HEAD + TAIL + 200) {
+      return content;
+    }
+    const omitted = content.length - HEAD - TAIL;
+    return (
+      content.slice(0, HEAD) +
+      `\n\n... (${omitted.toLocaleString("en-US")} chars of tool output omitted to save context; ` +
+      `re-run the tool if you need the full output) ...\n\n` +
+      content.slice(-TAIL)
+    );
+  }
+
+  /**
+   * (설정 ON 시) 이미 오래된 큰 도구 결과를 작은 모델로 요약해 turn.summary 에 캐시한다.
+   * 최신 toolResultFullCount 개는 원문 유지 대상이라 제외한다. 지연을 막으려 호출당 최대 2건.
+   * 실패하면 summary 를 두지 않아 buildMessages 가 규칙 기반 압축으로 폴백한다.
+   */
+  private async summarizeAgedToolResults(): Promise<void> {
+    const cfg = vscode.workspace.getConfiguration("nemotron");
+    if (!cfg.get<boolean>("summarizeToolResults", false)) {
+      return;
+    }
+    const key = await this.getApiKey();
+    if (!key) {
+      return;
+    }
+    const fullCount = Math.max(0, cfg.get<number>("toolResultFullCount", 3));
+    const THRESHOLD = 4000; // 이보다 짧으면 요약 이득이 없어 규칙 압축으로 충분
+    const idx: number[] = [];
+    for (let i = 0; i < this.history.length; i++) {
+      if (this.isToolResultTurn(this.history[i])) {
+        idx.push(i);
+      }
+    }
+    const aged = idx.slice(0, Math.max(0, idx.length - fullCount));
+    const targets = aged.filter(
+      (i) => !this.history[i].summary && this.history[i].content.length > THRESHOLD
+    );
+    for (const i of targets.slice(-2)) {
+      if (this.abort?.signal.aborted) {
+        return;
+      }
+      try {
+        const summary = await this.summarizeText(key, this.history[i].content);
+        if (summary) {
+          this.history[i].summary = "[Tool result summary]\n" + summary;
+        }
+      } catch {
+        /* 요약 실패 → summary 미설정 → 규칙 기반 압축으로 폴백 */
+      }
+    }
+  }
+
+  /** 작은 모델로 도구 출력 1건을 짧게 요약한다 (비스트리밍 없이 streamChat 재사용). */
+  private async summarizeText(key: string, content: string): Promise<string> {
+    const cfg = vscode.workspace.getConfiguration("nemotron");
+    const model =
+      cfg.get<string>("summarizeModel", "") ||
+      cfg.get<string>("model", "nvidia/nemotron-3-ultra-550b-a55b");
+    const maxRpm = cfg.get<number>("maxRpm", 40);
+    await this.limiter.acquire(maxRpm, { signal: this.abort?.signal });
+    const messages: ChatMessage[] = [
+      {
+        role: "system",
+        content:
+          "You compress a coding agent's tool/command output for its own memory. " +
+          "Summarize in at most 6 lines: the command/target, the outcome (success or failure), " +
+          "key errors/warnings with their identifiers, and any values needed to continue the task. " +
+          "Drop noise, banners, and repetition. Output only the summary text.",
+      },
+      { role: "user", content: content.slice(0, 40000) },
+    ];
+    const params: StreamParams = {
+      model,
+      temperature: 0.2,
+      topP: 0.95,
+      maxTokens: 512,
+      reasoningBudget: 0,
+      enableThinking: false,
+      plain: true,
+    };
+    let out = "";
+    for await (const ev of streamChat(key, messages, params, this.abort!.signal)) {
+      if (ev.type === "content") {
+        out += ev.text ?? "";
+      }
+    }
+    return out.trim();
   }
 
   /** ⑪ 워크스페이스 루트의 NEMOTRON.md 를 읽어 캐시 */
@@ -2380,6 +2497,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
 
         this.history.push({ role: "user", content: feedback, hidden: true });
+        // 방금 밀려난(오래된) 큰 도구 결과를 요약해 다음 반복부터 컨텍스트를 절약 (설정 ON 시)
+        await this.summarizeAgedToolResults();
         // 턴 중간 저장: 강제 종료돼도 직전 도구 작업까지 기록 보존
         void this.autoSaveSession();
 
