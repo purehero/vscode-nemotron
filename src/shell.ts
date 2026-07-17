@@ -51,6 +51,8 @@ export interface ShellResult {
   code: number | null;
   output: string;
   timedOut: boolean;
+  /** 셸 세션이 명령 도중 예기치 않게 종료됨(시그널 등) — 재시도 대상 */
+  crashed?: boolean;
 }
 
 export class PersistentShell {
@@ -178,6 +180,7 @@ export class PersistentShell {
           code: null,
           output: out.slice(0, MAX_OUTPUT) + "\n(shell session ended)",
           timedOut: false,
+          crashed: true, // 명령 도중 셸이 죽음 → 다음 실행 때 재기동, 재시도 대상
         });
       };
       const cleanup = () => {
