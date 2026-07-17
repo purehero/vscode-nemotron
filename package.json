@@ -242,6 +242,12 @@
           "minimum": 0,
           "description": "Maximum API requests per minute (RPM). Waits automatically when exceeded. 0 = no limit"
         },
+        "nemotron.maxRetries": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "description": "How many times to automatically retry a request that fails with a rate-limit/temporary error (HTTP 429/503/500) before giving up. Uses the Retry-After header when present, otherwise exponential backoff. 0 = no retry"
+        },
         "nemotron.maxToolIterations": {
           "type": "number",
           "default": 25,

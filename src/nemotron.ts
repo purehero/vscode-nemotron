@@ -36,6 +36,28 @@ export interface StreamEvent {
 const API_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 
 /**
+ * HTTP 비정상 응답을 에러로 만든다. 상태코드(status)와 Retry-After(retryAfterMs)를
+ * 실어 보내 호출측이 429/503 등을 백오프 재시도할 수 있게 한다.
+ */
+function httpError(status: number, headers: Headers, detail: string): Error {
+  const e = new Error(`HTTP ${status} — ${detail.slice(0, 500)}`);
+  (e as any).status = status;
+  const ra = headers.get("retry-after");
+  if (ra) {
+    const secs = Number(ra);
+    if (!Number.isNaN(secs)) {
+      (e as any).retryAfterMs = Math.min(60_000, Math.max(0, secs * 1000));
+    } else {
+      const when = Date.parse(ra); // HTTP-date 형식일 수도 있음
+      if (!Number.isNaN(when)) {
+        (e as any).retryAfterMs = Math.min(60_000, Math.max(0, when - Date.now()));
+      }
+    }
+  }
+  return e;
+}
+
+/**
  * 비전 모델에 이미지 1장 + 질문을 보내 텍스트 분석을 받는다 (비스트리밍).
  * capture_screen 도구가 사용한다. imageDataUrl 은 "data:image/jpeg;base64,..." 형식.
  */
@@ -78,7 +100,7 @@ export async function visionComplete(
     } catch {
       /* ignore */
     }
-    throw new Error(`HTTP ${resp.status} — ${detail.slice(0, 500)}`);
+    throw httpError(resp.status, resp.headers, detail);
   }
   const json: any = await resp.json();
   return json?.choices?.[0]?.message?.content ?? "";
@@ -126,7 +148,7 @@ export async function* streamChat(
     } catch {
       /* ignore */
     }
-    throw new Error(`HTTP ${resp.status} — ${detail.slice(0, 500)}`);
+    throw httpError(resp.status, resp.headers, detail);
   }
   if (!resp.body) {
     throw new Error("Response body (stream) is empty.");
