@@ -27,6 +27,8 @@ import {
   MEMORY_INSTRUCTION,
   captureAppScreenshot,
   CAPTURE_INSTRUCTION,
+  prepareImageForVision,
+  ANALYZE_INSTRUCTION,
 } from "./tools";
 import { RateLimiter } from "./rateLimiter";
 import { PersistentShell } from "./shell";
@@ -708,14 +710,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       .get<string>("systemPrompt", "");
     const nemoCfg = vscode.workspace.getConfiguration("nemotron");
     const memoryOn = nemoCfg.get<boolean>("enableMemory", true);
-    const captureOn =
-      nemoCfg.get<boolean>("enableScreenCapture", true) && process.platform === "darwin";
+    // enableScreenCapture 는 비전 기능 전체 스위치 역할. 파일 분석(analyze_image)은
+    // 모든 플랫폼에서 동작하고, 화면 캡쳐(capture_screen)만 macOS 로 한정한다.
+    const visionOn = nemoCfg.get<boolean>("enableScreenCapture", true);
+    const captureOn = visionOn && process.platform === "darwin";
     if (withTools) {
       sys =
         (sys ? sys + "\n\n" : "") +
         TOOL_INSTRUCTION +
         agentInstruction() +
         (memoryOn ? MEMORY_INSTRUCTION : "") +
+        (visionOn ? ANALYZE_INSTRUCTION : "") +
         (captureOn ? CAPTURE_INSTRUCTION : "");
     }
     // ⑪ 프로젝트 지침(NEMOTRON.md) 자동 포함
@@ -1297,6 +1302,106 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ok: false,
         output:
           `Saved the capture (${shot.path}) but vision analysis failed: ${String(err?.message ?? err)}. ` +
+          `Check that nemotron.visionModel ("${model}") is accessible with your API key.`,
+        preview: "vision failed",
+      };
+    }
+  }
+
+  /** analyze_image 도구: 워크스페이스의 기존 이미지 파일 → 비전 모델 분석 → 텍스트 결과 반환 */
+  private async analyzeImage(
+    path: string,
+    question: string
+  ): Promise<{ ok: boolean; output: string; preview: string }> {
+    const cfg = vscode.workspace.getConfiguration("nemotron");
+    if (!cfg.get<boolean>("enableScreenCapture", true)) {
+      return {
+        ok: false,
+        output: "Vision features are disabled (nemotron.enableScreenCapture).",
+        preview: "vision disabled",
+      };
+    }
+    const key = await this.getApiKey();
+    if (!key) {
+      return { ok: false, output: "No NVIDIA API key set.", preview: "no api key" };
+    }
+    const root = vscode.workspace.workspaceFolders?.[0];
+    if (!root) {
+      return { ok: false, output: "No open working folder.", preview: "no folder" };
+    }
+
+    // 큰 이미지는 비전 API 한도를 위해 축소(macOS)하고, 워크스페이스 밖 경로는 차단한다.
+    let prepared: { path: string; note: string };
+    try {
+      prepared = await prepareImageForVision(path, Date.now());
+    } catch (e: any) {
+      return {
+        ok: false,
+        output: "Could not read the image: " + String(e?.message ?? e),
+        preview: "read failed",
+      };
+    }
+
+    const uri = vscode.Uri.joinPath(root.uri, prepared.path);
+    const bytes = await vscode.workspace.fs.readFile(uri);
+    const b64 = Buffer.from(bytes).toString("base64");
+    const lower = prepared.path.toLowerCase();
+    const mime = lower.endsWith(".png")
+      ? "image/png"
+      : lower.endsWith(".webp")
+        ? "image/webp"
+        : lower.endsWith(".gif")
+          ? "image/gif"
+          : "image/jpeg";
+    const dataUrl = `data:${mime};base64,${b64}`;
+
+    // 분석 대상 이미지를 옆 편집기에 표시 (원본 경로)
+    try {
+      await vscode.commands.executeCommand(
+        "vscode.open",
+        vscode.Uri.joinPath(root.uri, path),
+        { viewColumn: vscode.ViewColumn.Beside, preview: true }
+      );
+    } catch {
+      /* 표시 실패는 무시 */
+    }
+
+    const model = cfg.get<string>("visionModel", "meta/llama-3.2-90b-vision-instruct");
+    const maxTokens = Math.min(cfg.get<number>("maxTokens", 16384), 4096);
+    const maxRpm = cfg.get<number>("maxRpm", 40);
+    try {
+      await this.limiter.acquire(maxRpm, { signal: this.abort?.signal });
+    } catch {
+      return { ok: false, output: "Stopped.", preview: "stopped" };
+    }
+    try {
+      const analysis = await visionComplete(
+        key,
+        model,
+        dataUrl,
+        question,
+        maxTokens,
+        this.abort!.signal
+      );
+      const bytesNote =
+        b64.length > 180_000
+          ? "\n(Note: the image is large; if the vision model rejected it, use a smaller image.)"
+          : "";
+      return {
+        ok: true,
+        output:
+          `${prepared.note}Analyzed ${path} (by ${model}).\n\n` +
+          `[Vision analysis]\n${analysis || "(empty response)"}${bytesNote}`,
+        preview: `🖼️ ${path} analyzed`,
+      };
+    } catch (err: any) {
+      if (err?.name === "AbortError") {
+        return { ok: false, output: "Image analysis was stopped.", preview: "stopped" };
+      }
+      return {
+        ok: false,
+        output:
+          `Vision analysis failed: ${String(err?.message ?? err)}. ` +
           `Check that nemotron.visionModel ("${model}") is accessible with your API key.`,
         preview: "vision failed",
       };
@@ -2187,6 +2292,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               this.post({ type: "plan", items });
             },
             captureScreen: (app, question) => this.captureScreen(app, question),
+            analyzeImage: (p, question) => this.analyzeImage(p, question),
           });
           results.push(res);
           this.post({
