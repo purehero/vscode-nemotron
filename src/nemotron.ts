@@ -26,9 +26,11 @@ export interface Usage {
 }
 
 export interface StreamEvent {
-  type: "reasoning" | "content" | "usage";
+  type: "reasoning" | "content" | "usage" | "finish";
   text?: string;
   usage?: Usage;
+  /** finish 이벤트의 종료 사유 ("stop" | "length"(토큰 한도로 잘림) 등) */
+  finishReason?: string;
 }
 
 const API_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
@@ -115,6 +117,10 @@ export async function* streamChat(
       }
       if (delta.content) {
         yield { type: "content", text: delta.content };
+      }
+      const finishReason = chunk?.choices?.[0]?.finish_reason;
+      if (finishReason) {
+        yield { type: "finish", finishReason };
       }
       if (chunk?.usage) {
         yield {
