@@ -36,8 +36,6 @@ export const TOOL_NAMES = [
   "edit_file",
   "apply_bytes",
   "run_command",
-  "check_command",
-  "stop_command",
   "get_diagnostics",
   "search_text",
   "list_symbols",
@@ -196,10 +194,8 @@ export const TOOL_INSTRUCTION = [
   "- apply_bytes: 'byte-level' partial edit using files that hold the before/after content. keys: path, old_file, new_file, replace_all (optional)",
   "- write_file : create/replace entirely. keys: path, plus <<<CONTENT / <<<END block",
   detectShell().kind === "bash"
-    ? "- run_command: run a command and inspect its output. keys: command (bash shell — use POSIX syntax like ls, cat, grep, $VAR, &&, |), background (optional true). Runs in the foreground in a persistent shell (cd/venv/env carry over between calls) and returns its output inline. If it exceeds the command timeout it is NOT failed: it is restarted in the background and you get a job id to poll with check_command. Pass background:true to detach immediately (e.g. a dev server). Background jobs run from the workspace root, so for a background/long command that needs a directory chain it in one command (e.g. cd sub && npm test)."
-    : "- run_command: run a command and inspect its output. keys: command (Windows cmd.exe — use dir, type, %VAR% syntax. POSIX commands like ls/cat/grep do not work), background (optional true). Runs in the foreground in a persistent shell (cd/env carry over between calls) and returns its output inline. If it exceeds the command timeout it is NOT failed: it is restarted in the background and you get a job id to poll with check_command. Pass background:true to detach immediately (e.g. a dev server). Background jobs run from the workspace root, so for a background/long command that needs a directory chain it in one command (e.g. cd sub && npm test).",
-  "- check_command: poll a background command (returned as a job id by run_command when it timed out or was started with background:true). key: id (optional; lists all running jobs if omitted). Returns only the output produced since the previous check, plus whether the job is still running or its exit code. Keep polling until it reports it finished.",
-  "- stop_command: terminate a running background command. key: id",
+    ? "- run_command: run a command and inspect its output. keys: command (bash shell — use POSIX syntax like ls, cat, grep, $VAR, &&, |), background (optional true). Runs in a persistent shell (cd/venv/env carry over between calls) and WAITS until the command finishes — however long that takes (builds, installs, tests) — then returns the full output and exit code. It never times out. Only pass background:true for a process that never exits on its own (e.g. a dev server): it is started without waiting and keeps running in the background."
+    : "- run_command: run a command and inspect its output. keys: command (Windows cmd.exe — use dir, type, %VAR% syntax. POSIX commands like ls/cat/grep do not work), background (optional true). Runs in a persistent shell (cd/env carry over between calls) and WAITS until the command finishes — however long that takes (builds, installs, tests) — then returns the full output and exit code. It never times out. Only pass background:true for a process that never exits on its own (e.g. a dev server): it is started without waiting and keeps running in the background.",
   "- get_diagnostics: the editor's error/warning list (Problems). key: path (optional; whole workspace if omitted)",
   "- search_text : search file contents (grep). keys: query, glob (optional), regex (optional true), max (optional)",
   "- list_symbols : symbol list (language server). key: path (document symbol tree) or query (workspace symbol search)",
@@ -232,7 +228,7 @@ export const TOOL_INSTRUCTION = [
   "- get_diagnostics is accurate only when the relevant language extension (e.g. Python=Pylance) is installed. If diagnostics are empty but you suspect a syntax error, check directly with run_command (e.g. python -m py_compile file.py).",
   "- GDScript (.gd) is handled automatically by get_diagnostics: it uses Godot editor (LSP) diagnostics first, and falls back to the godot CLI (--check-only) for syntax checking.",
   "- To confirm an error by running code, view the output with run_command, then fix it with edit_file.",
-  "- Commands run in the foreground with the command timeout by default. Long-running commands (builds, installs like npm install / pip install, full test suites, dev servers) that exceed the timeout are not failed — they are automatically restarted in the background and run_command returns a job id. Poll check_command with that id until it reports the exit code, then continue. For a command you know is long-lived (e.g. a dev server you just want to start), pass background: true so it detaches immediately instead of first spending the timeout in the foreground.",
+  "- run_command waits for the command to finish, however long it takes (builds, installs, and test suites are fine — just call it once and wait for the result). Do not try to poll or re-run it while it is working. Use background: true only for a process that never returns on its own, such as a dev server.",
   "- Once you have enough information from the results, write the final answer without tools. Respond in the user's language.",
   "- **When you have finished all tool-based work, you MUST end your response with the declaration 'Task completed.' followed by a summary. Without it the system assumes the work is unfinished and will ask you to continue.**",
   "- If you need a user decision mid-task, end your response with a question that finishes with a question mark (?).",
@@ -1041,8 +1037,10 @@ export interface ToolContext {
   recordBackup?: (relPath: string, bytes: Uint8Array | null) => void;
   /** 지속 셸 세션 (cd/venv 유지). 없으면 단발 프로세스로 실행. */
   shell?: PersistentShell;
-  /** 백그라운드 명령 잡 관리 (run_command background / check_command / stop_command). */
+  /** 백그라운드 명령 잡 관리 (background:true 분리 실행 및 정리). */
   background?: BackgroundJobs;
+  /** 실행 중 진행 상황(경과 시간 등)을 UI 에 한 줄로 표시 (run_command 대기 중). */
+  reportProgress?: (text: string) => void;
   /** sub-agent 실행 (run_agent 도구). */
   runAgent?: (
     agent: string,
@@ -1093,14 +1091,18 @@ function runShell(
     };
     child.stdout?.on("data", capture);
     child.stderr?.on("data", capture);
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try {
-        child.kill();
-      } catch {
-        /* ignore */
-      }
-    }, timeoutMs);
+    // timeoutMs <= 0 → 무제한(명령이 끝날 때까지 대기)
+    const timer =
+      timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            try {
+              child.kill();
+            } catch {
+              /* ignore */
+            }
+          }, timeoutMs)
+        : undefined;
     child.on("error", (e) => {
       clearTimeout(timer);
       // spawn 실패(EAGAIN 등 자원 부족) — 일시적일 수 있어 재시도 대상
@@ -1431,15 +1433,16 @@ export async function runTool(call: ToolCall, ctx: ToolContext): Promise<ToolRes
         }
         const cwd = workspaceRoot().fsPath;
         const cfg = vscode.workspace.getConfiguration("nemotron");
-        const timeoutMs = cfg.get<number>("commandTimeout", 60000);
+        // 0(또는 음수) = 무제한: 명령이 끝날 때까지 죽이지 않고 기다린다.
+        const timeoutMs = cfg.get<number>("commandTimeout", 0);
 
-        // background:true → 기다리지 않고 즉시 백그라운드로 분리(개발 서버 등).
+        // background:true → 기다리지 않고 즉시 백그라운드로 분리(끝나지 않는 개발 서버 등).
         if (call.args?.background === true && ctx.background) {
           const id = ctx.background.start(command);
           const s = await ctx.background.wait(id, 1000);
           const dropNote = s.dropped ? "…(earlier output dropped)\n" : "";
           if (s.running) {
-            const statusLine = `background started: id=${id} (running)`;
+            const statusLine = `started in background: id=${id} (running)`;
             return {
               name: call.name,
               ok: true,
@@ -1447,12 +1450,11 @@ export async function runTool(call: ToolCall, ctx: ToolContext): Promise<ToolRes
                 `$ ${command}\n[${statusLine}]\n` +
                 dropNote +
                 (s.newOutput.trim() || "(no output yet)") +
-                `\n\nPoll check_command (id: ${id}) for further output and the exit code; stop_command (id: ${id}) to cancel.`,
+                `\n\nStarted without waiting (use this only for processes that do not exit, e.g. a dev server). It keeps running until the user stops it or the panel closes.`,
               preview: `${command}  →  ${statusLine}`,
             };
           }
-          const status =
-            s.code === 0 ? `exit code 0` : `exit code ${s.code}`;
+          const status = s.code === 0 ? `exit code 0` : `exit code ${s.code}`;
           return {
             name: call.name,
             ok: s.code === 0,
@@ -1464,45 +1466,34 @@ export async function runTool(call: ToolCall, ctx: ToolContext): Promise<ToolRes
           };
         }
 
-        // 기본: 지속 셸에서 포그라운드 실행(cd/venv 유지, commandTimeout 적용).
+        // 기본: 지속 셸에서 실행하고 끝날 때까지 기다린다(cd/venv 유지).
+        // 대기 중 1초마다 경과 시간을 UI 에 표시한다(reportProgress).
         const usePersistent = !!ctx.shell;
-        const res = usePersistent
-          ? await ctx.shell!.run(command, timeoutMs)
-          : await runShell(command, cwd, timeoutMs);
-
-        // 타임아웃 발생 → 죽은 명령을 백그라운드로 다시 띄우고 폴링하도록 안내.
-        // (포그라운드 시도는 이미 종료됨 → 처음부터 재실행. cd 상태는 워크스페이스
-        //  루트 기준이므로, cd 후 명령이면 한 줄로 묶어 실행할 것.)
-        if (res.timedOut && ctx.background) {
-          const id = ctx.background.start(command);
-          const s = await ctx.background.wait(id, 1000);
-          const dropNote = s.dropped ? "…(earlier output dropped)\n" : "";
-          if (s.running) {
-            const statusLine = `timed out after ${timeoutMs}ms → re-running in background: id=${id}`;
-            return {
-              name: call.name,
-              ok: true,
-              output:
-                `$ ${command}\n[${statusLine}]\n` +
-                dropNote +
-                (s.newOutput.trim() || "(no output yet)") +
-                `\n\nThe foreground attempt was stopped at the timeout and the command was restarted from scratch in the background (runs from the workspace root). Poll check_command (id: ${id}) for further output and the exit code; stop_command (id: ${id}) to cancel.`,
-              preview: `${command}  →  ${statusLine}`,
-            };
-          }
-          // 백그라운드에서 1초 내에 끝남(드묾) → 결과 반환
-          const status =
-            s.code === 0 ? `exit code 0` : `exit code ${s.code}`;
-          return {
-            name: call.name,
-            ok: s.code === 0,
-            output:
-              `$ ${command}\n[timed out in foreground, then finished in background, ${status}]\n` +
-              dropNote +
-              (s.newOutput.trim() || "(no output)"),
-            preview: `${command}  →  ${status}`,
-          };
+        const startTs = Date.now();
+        let ticker: ReturnType<typeof setInterval> | undefined;
+        if (ctx.reportProgress) {
+          ctx.reportProgress(`$ ${command}  ⏳ 0s`);
+          ticker = setInterval(() => {
+            const secs = Math.round((Date.now() - startTs) / 1000);
+            ctx.reportProgress!(`$ ${command}  ⏳ ${secs}s`);
+          }, 1000);
         }
+        let res: {
+          code: number | null;
+          output: string;
+          timedOut: boolean;
+          crashed?: boolean;
+        };
+        try {
+          res = usePersistent
+            ? await ctx.shell!.run(command, timeoutMs)
+            : await runShell(command, cwd, timeoutMs);
+        } finally {
+          if (ticker) {
+            clearInterval(ticker);
+          }
+        }
+        const elapsedS = Math.round((Date.now() - startTs) / 1000);
 
         // 시그널성/일시적 실패 판정.
         const killedBySignal =
@@ -1518,80 +1509,9 @@ export async function runTool(call: ToolCall, ctx: ToolContext): Promise<ToolRes
         return {
           name: call.name,
           ok: res.code === 0 && !res.timedOut,
-          output: `$ ${command}\n[${status}]\n${res.output || "(no output)"}`,
-          preview: `${command}  →  ${status}`,
+          output: `$ ${command}\n[${status}, ${elapsedS}s]\n${res.output || "(no output)"}`,
+          preview: `${command}  →  ${status} (${elapsedS}s)`,
           retryable,
-        };
-      }
-      case "check_command": {
-        if (!ctx.background) {
-          throw new Error("Background commands are not available.");
-        }
-        const id = String(call.args?.id ?? "").trim();
-        if (!id) {
-          const jobs = ctx.background.list();
-          if (jobs.length === 0) {
-            return {
-              name: call.name,
-              ok: true,
-              output: "No background commands are running.",
-              preview: "no background jobs",
-            };
-          }
-          const lines = jobs.map(
-            (j) =>
-              `${j.id}: ${j.running ? "running" : `exit ${j.code}`} (${Math.round(
-                j.elapsedMs / 1000
-              )}s)  $ ${j.command}`
-          );
-          return {
-            name: call.name,
-            ok: true,
-            output: lines.join("\n"),
-            preview: `${jobs.length} background job(s)`,
-          };
-        }
-        const s = ctx.background.check(id);
-        if (!s.exists) {
-          return {
-            name: call.name,
-            ok: false,
-            output: `No background command with id ${id} (it may have already finished and been read).`,
-            preview: `${id} not found`,
-          };
-        }
-        const statusLine = s.running
-          ? `running (${Math.round(s.elapsedMs / 1000)}s elapsed)`
-          : s.signal
-            ? `terminated by signal ${s.signal}`
-            : `finished, exit code ${s.code}`;
-        const body =
-          (s.dropped ? "…(earlier output dropped)\n" : "") +
-          (s.newOutput.trim() ||
-            (s.running ? "(no new output since last check)" : "(no output)"));
-        return {
-          name: call.name,
-          ok: s.running || s.code === 0,
-          output: `[${id}] ${statusLine}\n${body}`,
-          preview: `${id}  →  ${statusLine}`,
-        };
-      }
-      case "stop_command": {
-        if (!ctx.background) {
-          throw new Error("Background commands are not available.");
-        }
-        const id = String(call.args?.id ?? "").trim();
-        if (!id) {
-          throw new Error("An id is required.");
-        }
-        const stopped = ctx.background.stop(id);
-        return {
-          name: call.name,
-          ok: stopped,
-          output: stopped
-            ? `Stopped background command ${id}.`
-            : `No background command with id ${id}.`,
-          preview: stopped ? `${id} stopped` : `${id} not found`,
         };
       }
       case "get_diagnostics": {

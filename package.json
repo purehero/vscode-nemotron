@@ -2,7 +2,7 @@
   "name": "nemotron-chat",
   "displayName": "Nemotron Chat",
   "description": "NVIDIA Nemotron AI chat and coding assistant for VSCode",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -228,8 +228,8 @@
         },
         "nemotron.commandTimeout": {
           "type": "number",
-          "default": 60000,
-          "description": "run_command foreground timeout (milliseconds). Commands run in the foreground with this limit; if one exceeds it, instead of failing it is restarted in the background and run_command returns a job id to poll with check_command."
+          "default": 0,
+          "description": "run_command hard time limit (milliseconds). 0 (default) = no limit: run_command waits until the command finishes, however long it takes (the elapsed time ticks in the chat). Set a positive value to kill and fail a command that runs longer than that."
         },
         "nemotron.verifyCommand": {
           "type": "string",

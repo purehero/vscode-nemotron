@@ -9,9 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `check_command` polling no longer spams the chat: instead of appending a new
-  line on every poll, it updates a single line in place (per job id) so the
-  elapsed time just ticks up.
+- `run_command` no longer times out on long-running commands. It runs in the
+  persistent shell (cd/venv/env preserved) and waits until the command finishes,
+  however long that takes (builds, installs, full test suites), then returns the
+  full output and exit code. While it waits, the elapsed time ticks live on a
+  single line in the chat (updated every second) instead of spamming new lines.
+  `nemotron.commandTimeout` now defaults to `0` (no limit); set a positive value
+  to cap and fail commands that run longer. The completion-gate verify command
+  (`nemotron.verifyCommand`) likewise waits for completion. Pass `background:
+  true` only for a process that never exits on its own (e.g. a dev server): it
+  is started without waiting and keeps running until the run is stopped or the
+  panel is disposed. (The earlier `check_command`/`stop_command` polling tools
+  were removed — no polling is needed now.)
 
 ### Added
 
@@ -23,20 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it is not a git checkout the command explains how to set that up. See the
   "Development install" section in the README. Slash commands now accept
   arguments (`/command arg`).
-
-- Background commands: `run_command` no longer fails long-running commands
-  (builds, installs, full test suites, dev servers) on the timeout. Commands run
-  in the foreground in the persistent shell as before (cd/venv/env carry over,
-  output returned inline), but if one exceeds `nemotron.commandTimeout` it is
-  no longer killed and failed — it is automatically restarted in the background
-  and `run_command` returns a job id. The AI polls it with the new
-  `check_command` tool (returns only the output since the last check, plus
-  running/exit status) and can cancel with the new `stop_command`. Pass
-  `background: true` to detach immediately without spending the timeout in the
-  foreground (e.g. starting a dev server). The completion-gate verify command
-  (`nemotron.verifyCommand`) likewise now waits for completion instead of timing
-  out. Background jobs run from the workspace root and are killed when the run is
-  stopped or the chat panel is disposed.
 - Screen capture + vision (macOS): the AI can capture a specific app's window
   with the `capture_screen` tool (target by app name, or the full screen),
   send it to an NVIDIA vision model (`nemotron.visionModel`), and get back a

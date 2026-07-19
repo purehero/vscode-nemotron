@@ -1,6 +1,6 @@
-// 백그라운드 명령 실행: 오래 걸리는 명령(빌드/설치/테스트/개발서버)을
-// 죽이지 않고 별도 프로세스로 띄운 뒤, check_command 로 진행 상황을 폴링한다.
-// run_command 의 동기 타임아웃과 달리 완료를 기다리지 않으므로 타임아웃 실패가 없다.
+// 백그라운드 명령 실행: 스스로 종료되지 않는 프로세스(개발 서버 등)를 별도
+// 프로세스로 띄우고 기다리지 않는다(run_command background:true). 완료 게이트
+// 검증 명령(verifyCommand)도 이 매니저로 실행해 완료까지 폴링한다.
 
 import * as cp from "child_process";
 import { detectShell } from "./shell";

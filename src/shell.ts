@@ -193,15 +193,19 @@ export class PersistentShell {
       // exit: 자식이 stdio 파이프를 잡고 있어도 셸 종료 즉시 감지
       proc.on("exit", onClose);
       proc.on("close", onClose);
-      const timer = setTimeout(() => {
-        cleanup();
-        this.dispose(); // 멈춘 명령 → 세션 재시작
-        resolve({
-          code: null,
-          output: out.slice(0, MAX_OUTPUT),
-          timedOut: true,
-        });
-      }, timeoutMs);
+      // timeoutMs <= 0 → 무제한(명령이 끝날 때까지 대기, 죽이지 않음)
+      const timer =
+        timeoutMs > 0
+          ? setTimeout(() => {
+              cleanup();
+              this.dispose(); // 멈춘 명령 → 세션 재시작
+              resolve({
+                code: null,
+                output: out.slice(0, MAX_OUTPUT),
+                timedOut: true,
+              });
+            }, timeoutMs)
+          : undefined;
       proc.stdout?.on("data", onData);
       proc.stderr?.on("data", onData);
       const suffix =

@@ -2735,6 +2735,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             recordBackup: (p, bytes) => this.recordBackup(p, bytes),
             shell: this.getShell(),
             background: this.getBackground(),
+            reportProgress: (text) => this.post({ type: "toolProgress", text }),
             runAgent: (a, t) => this.runSubAgent(a, t),
             updatePlan: (items) => {
               this.plan = items;
@@ -2744,6 +2745,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             analyzeImage: (p, question) => this.analyzeImage(p, question),
           });
           results.push(res);
+          this.post({ type: "toolProgressEnd" });
           this.post({
             type: "toolResult",
             name: res.name,
@@ -2907,12 +2909,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         String(args?.command ?? "") +
         (args?.background === true ? " (background)" : "")
       );
-    }
-    if (name === "check_command") {
-      return args?.id ? String(args.id) : "list jobs";
-    }
-    if (name === "stop_command") {
-      return String(args?.id ?? "");
     }
     if (name === "get_diagnostics") {
       return args?.path ? String(args.path) : "all";
