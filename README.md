@@ -23,7 +23,9 @@ host (Node.js), there are no CORS issues.
   | `edit_file` | Partial edit via `<<<OLD/<<<NEW/<<<END` blocks (no whole-file rewrites) |
   | `apply_bytes` | Byte-level partial edit using before/after files (for special characters / large content) |
   | `write_file` | Create or fully replace a file |
-  | `run_command` | Run a terminal command and inspect output (persistent bash session) |
+  | `run_command` | Run a terminal command and inspect output (persistent bash session); `background: true` runs long tasks detached |
+  | `check_command` | Poll a background command for new output and its exit status |
+  | `stop_command` | Terminate a background command |
   | `get_diagnostics` | Read editor errors/warnings (with a GDScript CLI fallback) |
   | `list_symbols` | List document or workspace symbols (language server) |
   | `find_definition` | Find a symbol's definition (language server) |

@@ -32,6 +32,7 @@ import {
 } from "./tools";
 import { RateLimiter } from "./rateLimiter";
 import { PersistentShell } from "./shell";
+import { BackgroundJobs } from "./background";
 
 // 빌드 시각: esbuild 의 define 로 주입된다 (tsc 는 이 선언으로 통과)
 declare const __BUILD_TIME__: string;
@@ -123,6 +124,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   // ⑫ 지속 셸 세션
   private shell?: PersistentShell;
+  private background?: BackgroundJobs;
 
   // 작업 계획(update_plan 도구) — 현재 세션의 체크리스트
   private plan: { text: string; done: boolean }[] = [];
@@ -142,7 +144,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ProposedContentProvider.scheme,
         this.proposed
       ),
-      { dispose: () => this.shell?.dispose() }
+      {
+        dispose: () => {
+          this.shell?.dispose();
+          this.background?.disposeAll();
+        },
+      }
     );
   }
 
@@ -217,6 +224,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.shell = new PersistentShell(root.uri.fsPath);
     }
     return this.shell;
+  }
+
+  private getBackground(): BackgroundJobs | undefined {
+    const root = vscode.workspace.workspaceFolders?.[0];
+    if (!root) {
+      return undefined;
+    }
+    if (!this.background) {
+      this.background = new BackgroundJobs(root.uri.fsPath);
+    }
+    return this.background;
   }
 
   // ── WebviewViewProvider (사이드바) ──
@@ -2600,6 +2618,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             confirmCommand: (c) => this.confirmCommand(c),
             recordBackup: (p, bytes) => this.recordBackup(p, bytes),
             shell: this.getShell(),
+            background: this.getBackground(),
             runAgent: (a, t) => this.runSubAgent(a, t),
             updatePlan: (items) => {
               this.plan = items;
@@ -2768,7 +2787,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return String(args?.path ?? "");
     }
     if (name === "run_command") {
-      return String(args?.command ?? "");
+      return (
+        String(args?.command ?? "") +
+        (args?.background === true ? " (background)" : "")
+      );
+    }
+    if (name === "check_command") {
+      return args?.id ? String(args.id) : "list jobs";
+    }
+    if (name === "stop_command") {
+      return String(args?.id ?? "");
     }
     if (name === "get_diagnostics") {
       return args?.path ? String(args.path) : "all";

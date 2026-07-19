@@ -2,7 +2,7 @@
   "name": "nemotron-chat",
   "displayName": "Nemotron Chat",
   "description": "NVIDIA Nemotron AI chat and coding assistant for VSCode",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publisher": "local",
   "license": "MIT",
   "repository": {

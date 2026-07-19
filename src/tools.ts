@@ -5,6 +5,7 @@ import * as vscode from "vscode";
 import * as cp from "child_process";
 import * as fs from "fs";
 import { PersistentShell, detectShell } from "./shell";
+import { BackgroundJobs } from "./background";
 
 export interface ToolCall {
   name: string;
@@ -35,6 +36,8 @@ export const TOOL_NAMES = [
   "edit_file",
   "apply_bytes",
   "run_command",
+  "check_command",
+  "stop_command",
   "get_diagnostics",
   "search_text",
   "list_symbols",
@@ -193,8 +196,10 @@ export const TOOL_INSTRUCTION = [
   "- apply_bytes: 'byte-level' partial edit using files that hold the before/after content. keys: path, old_file, new_file, replace_all (optional)",
   "- write_file : create/replace entirely. keys: path, plus <<<CONTENT / <<<END block",
   detectShell().kind === "bash"
-    ? "- run_command: run a command and inspect its output. key: command (bash shell — use POSIX syntax like ls, cat, grep, $VAR, &&, |)"
-    : "- run_command: run a command and inspect its output. key: command (Windows cmd.exe — use dir, type, %VAR% syntax. POSIX commands like ls/cat/grep do not work)",
+    ? "- run_command: run a command and inspect its output. keys: command (bash shell — use POSIX syntax like ls, cat, grep, $VAR, &&, |), background (optional true — see check_command)"
+    : "- run_command: run a command and inspect its output. keys: command (Windows cmd.exe — use dir, type, %VAR% syntax. POSIX commands like ls/cat/grep do not work), background (optional true — see check_command)",
+  "- check_command: poll a command started with run_command + background:true. key: id (optional; lists all running jobs if omitted). Returns only the output produced since the previous check, plus whether the job is still running or its exit code.",
+  "- stop_command: terminate a background command. key: id",
   "- get_diagnostics: the editor's error/warning list (Problems). key: path (optional; whole workspace if omitted)",
   "- search_text : search file contents (grep). keys: query, glob (optional), regex (optional true), max (optional)",
   "- list_symbols : symbol list (language server). key: path (document symbol tree) or query (workspace symbol search)",
@@ -227,6 +232,7 @@ export const TOOL_INSTRUCTION = [
   "- get_diagnostics is accurate only when the relevant language extension (e.g. Python=Pylance) is installed. If diagnostics are empty but you suspect a syntax error, check directly with run_command (e.g. python -m py_compile file.py).",
   "- GDScript (.gd) is handled automatically by get_diagnostics: it uses Godot editor (LSP) diagnostics first, and falls back to the godot CLI (--check-only) for syntax checking.",
   "- To confirm an error by running code, view the output with run_command, then fix it with edit_file.",
+  "- Long-running commands (builds, installs like npm install / pip install, full test suites, dev servers) can exceed the command timeout and fail. Start them with run_command + background: true, which returns a job id immediately, then poll check_command with that id until it finishes. Use stop_command to cancel. Do NOT use background for quick commands.",
   "- Once you have enough information from the results, write the final answer without tools. Respond in the user's language.",
   "- **When you have finished all tool-based work, you MUST end your response with the declaration 'Task completed.' followed by a summary. Without it the system assumes the work is unfinished and will ask you to continue.**",
   "- If you need a user decision mid-task, end your response with a question that finishes with a question mark (?).",
@@ -378,7 +384,7 @@ function parseBlock(tag: string, lines: string[]): ToolCall | null {
     if (kv) {
       const key = kv[1];
       const raw = kv[2];
-      if (key === "replace_all" || key === "regex") {
+      if (key === "replace_all" || key === "regex" || key === "background") {
         args[key] = /^\s*true\s*$/i.test(raw);
       } else if (key === "max") {
         args[key] = Number(raw.trim());
@@ -1035,6 +1041,8 @@ export interface ToolContext {
   recordBackup?: (relPath: string, bytes: Uint8Array | null) => void;
   /** 지속 셸 세션 (cd/venv 유지). 없으면 단발 프로세스로 실행. */
   shell?: PersistentShell;
+  /** 백그라운드 명령 잡 관리 (run_command background / check_command / stop_command). */
+  background?: BackgroundJobs;
   /** sub-agent 실행 (run_agent 도구). */
   runAgent?: (
     agent: string,
@@ -1115,6 +1123,11 @@ function runShell(
       });
     });
   });
+}
+
+/** 주어진 시간(ms)만큼 대기한다. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** 미리보기용으로 문자열을 앞뒤로 자른다. */
@@ -1424,6 +1437,29 @@ export async function runTool(call: ToolCall, ctx: ToolContext): Promise<ToolRes
         const cwd = workspaceRoot().fsPath;
         const cfg = vscode.workspace.getConfiguration("nemotron");
         const timeoutMs = cfg.get<number>("commandTimeout", 60000);
+        // 백그라운드 실행: 완료를 기다리지 않고 즉시 잡 id 반환 → 타임아웃 무관.
+        if (call.args?.background === true && ctx.background) {
+          const id = ctx.background.start(command);
+          // 즉시 실패(잘못된 명령 등)나 초기 로그를 잡아 보여주기 위해 잠깐 엿본다.
+          await sleep(1000);
+          const s = ctx.background.check(id);
+          const running = s.exists ? s.running : false;
+          const statusLine = running
+            ? `background started: id=${id} (running)`
+            : `background ${id} finished immediately, exit code ${s.code}`;
+          const body = s.newOutput.trim();
+          return {
+            name: call.name,
+            ok: running || s.code === 0,
+            output:
+              `$ ${command}\n[${statusLine}]\n` +
+              (body || "(no output yet)") +
+              (running
+                ? `\n\nPoll with check_command (id: ${id}) to get further output and the exit code.`
+                : ""),
+            preview: `${command}  →  ${statusLine}`,
+          };
+        }
         const usePersistent = cfg.get<boolean>("persistentShell", true) && ctx.shell;
         const res = usePersistent
           ? await ctx.shell!.run(command, timeoutMs)
@@ -1434,8 +1470,12 @@ export async function runTool(call: ToolCall, ctx: ToolContext): Promise<ToolRes
         const killedBySignal =
           !res.timedOut && res.code !== null && res.code > 128 && res.code < 192;
         const retryable = !!res.crashed || killedBySignal;
+        // 타임아웃 시, 오래 걸리는 명령이면 백그라운드로 다시 돌리라고 모델에 안내.
+        const timeoutHint = ctx.background
+          ? " — if this is a long-running command (build/install/test/server), re-run it with background: true and poll check_command instead"
+          : "";
         const status = res.timedOut
-          ? `stopped by timeout (${timeoutMs}ms)${usePersistent ? " (shell restarted)" : ""}`
+          ? `stopped by timeout (${timeoutMs}ms)${usePersistent ? " (shell restarted)" : ""}${timeoutHint}`
           : res.crashed
             ? "shell terminated (signal?)"
             : killedBySignal
@@ -1447,6 +1487,77 @@ export async function runTool(call: ToolCall, ctx: ToolContext): Promise<ToolRes
           output: `$ ${command}\n[${status}]\n${res.output || "(no output)"}`,
           preview: `${command}  →  ${status}`,
           retryable,
+        };
+      }
+      case "check_command": {
+        if (!ctx.background) {
+          throw new Error("Background commands are not available.");
+        }
+        const id = String(call.args?.id ?? "").trim();
+        if (!id) {
+          const jobs = ctx.background.list();
+          if (jobs.length === 0) {
+            return {
+              name: call.name,
+              ok: true,
+              output: "No background commands are running.",
+              preview: "no background jobs",
+            };
+          }
+          const lines = jobs.map(
+            (j) =>
+              `${j.id}: ${j.running ? "running" : `exit ${j.code}`} (${Math.round(
+                j.elapsedMs / 1000
+              )}s)  $ ${j.command}`
+          );
+          return {
+            name: call.name,
+            ok: true,
+            output: lines.join("\n"),
+            preview: `${jobs.length} background job(s)`,
+          };
+        }
+        const s = ctx.background.check(id);
+        if (!s.exists) {
+          return {
+            name: call.name,
+            ok: false,
+            output: `No background command with id ${id} (it may have already finished and been read).`,
+            preview: `${id} not found`,
+          };
+        }
+        const statusLine = s.running
+          ? `running (${Math.round(s.elapsedMs / 1000)}s elapsed)`
+          : s.signal
+            ? `terminated by signal ${s.signal}`
+            : `finished, exit code ${s.code}`;
+        const body =
+          (s.dropped ? "…(earlier output dropped)\n" : "") +
+          (s.newOutput.trim() ||
+            (s.running ? "(no new output since last check)" : "(no output)"));
+        return {
+          name: call.name,
+          ok: s.running || s.code === 0,
+          output: `[${id}] ${statusLine}\n${body}`,
+          preview: `${id}  →  ${statusLine}`,
+        };
+      }
+      case "stop_command": {
+        if (!ctx.background) {
+          throw new Error("Background commands are not available.");
+        }
+        const id = String(call.args?.id ?? "").trim();
+        if (!id) {
+          throw new Error("An id is required.");
+        }
+        const stopped = ctx.background.stop(id);
+        return {
+          name: call.name,
+          ok: stopped,
+          output: stopped
+            ? `Stopped background command ${id}.`
+            : `No background command with id ${id}.`,
+          preview: stopped ? `${id} stopped` : `${id} not found`,
         };
       }
       case "get_diagnostics": {
