@@ -1,0 +1,18 @@
+{
+  "name": "nemotron-cli",
+  "version": "0.1.0",
+  "description": "Nemotron terminal coding agent — the shared core used from a terminal in VSCode / Android Studio",
+  "bin": {
+    "nemotron": "dist/nemotron.cjs"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "node dist/nemotron.cjs",
+    "typecheck": "tsc --noEmit",
+    "pkg": "pkg dist/nemotron.cjs --targets node18-win-x64,node18-macos-arm64,node18-macos-x64 --out-path bin"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.4.5"
+  }
+}
