@@ -34,7 +34,7 @@ export const TOOL_INSTRUCTION = [
   "",
   "Available tools:",
   "- list_files : list project files. keys: glob (optional, e.g. **/*.ts), max (optional)",
-  "- read_file  : read a file. key: path",
+  "- read_file  : read a file. keys: path, offset (optional 1-based start line), limit (optional line count). Use offset/limit to read a specific range of a large file.",
   "- write_file : create/replace a file entirely. keys: path, plus <<<CONTENT/<<<END",
   "- edit_file  : replace part of a file. keys: path, replace_all (optional true), plus <<<OLD/<<<NEW/<<<END. The OLD text must match exactly and be unique (add context).",
   "- apply_bytes: byte-level partial edit using files that hold the before/after content. keys: path, old_file, new_file, replace_all (optional true). Use when the content is very long or collides with the <<<END delimiter.",

@@ -2,10 +2,24 @@
 // 대화형 REPL: 메시지를 입력하면 스트리밍 응답 + 도구 실행.
 
 import * as readline from "readline";
+import * as fs from "fs";
+import * as path from "path";
 import { ChatMessage } from "../../src/nemotron";
 import { loadConfig, saveConfigValue, configPath, CliConfig } from "./config";
 import { runAgentTurn, AgentIO } from "./agent";
 import { PlanItem } from "./tools";
+import { saveSession, loadSession, clearSession } from "./session";
+
+/** 프로젝트 유형을 보고 진단 명령 기본값을 추정한다(제안용). */
+function suggestDiagnostics(root: string): string {
+  const has = (f: string) => fs.existsSync(path.join(root, f));
+  if (has("tsconfig.json")) return "npx tsc --noEmit";
+  if (has("build.gradle") || has("build.gradle.kts")) return "./gradlew compileDebugKotlin -q";
+  if (has("Cargo.toml")) return "cargo check";
+  if (has("go.mod")) return "go build ./...";
+  if (has("pyproject.toml") || has("requirements.txt")) return "ruff check .";
+  return "";
+}
 
 const C = {
   reset: "\x1b[0m",
@@ -29,6 +43,9 @@ const HELP = [
   "  /model <id>      set the model id",
   "  /auto            toggle auto-approve for writes/commands",
   "  /verify <cmd>    set a completion-gate command (build/test); empty to disable",
+  "  /diag <cmd>      run this after each edit and feed problems back; empty to disable",
+  "  /undo            revert the last file edit",
+  "  /resume          restore the previous conversation for this project",
   "  /clear           clear the conversation",
   "  /exit            quit",
   "",
@@ -39,6 +56,7 @@ async function main() {
   let cfg = loadConfig();
   const history: ChatMessage[] = [];
   const plan: PlanItem[] = [];
+  const undoStack: { path: string; prior: string | null }[] = [];
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -63,9 +81,21 @@ async function main() {
   );
   if (!cfg.apiKey) {
     process.stdout.write(
-      paint(C.yellow, "No API key found. Set it with:  /key <NVIDIA_API_KEY>  (or env NVIDIA_API_KEY)\n\n")
+      paint(C.yellow, "No API key found. Set it with:  /key <NVIDIA_API_KEY>  (or env NVIDIA_API_KEY)\n")
     );
   }
+  if (loadSession(process.cwd())) {
+    process.stdout.write(paint(C.gray, "A previous session for this project exists — /resume to continue it.\n"));
+  }
+  if (!cfg.diagnosticsCommand) {
+    const sug = suggestDiagnostics(process.cwd());
+    if (sug) {
+      process.stdout.write(
+        paint(C.gray, `Tip: auto-check edits with  /diag ${sug}\n`)
+      );
+    }
+  }
+  process.stdout.write("\n");
 
   let progressActive = false;
   const io: AgentIO = {
@@ -83,11 +113,25 @@ async function main() {
         progressActive = false;
       }
     },
-    confirm: async (summary) => {
+    confirm: async (summary, diff) => {
+      if (diff) {
+        const colored = diff
+          .split("\n")
+          .map((l) =>
+            l.startsWith("+ ")
+              ? paint(C.green, l)
+              : l.startsWith("- ")
+                ? paint(C.red, l)
+                : paint(C.gray, l)
+          )
+          .join("\n");
+        process.stdout.write("\n" + colored + "\n");
+      }
       if (cfg.autoApprove) return true;
-      const a = await ask(rl, paint(C.yellow, `\n? ${summary}\n  Run this? [y/N] `));
+      const a = await ask(rl, paint(C.yellow, `? ${summary}\n  Apply? [y/N] `));
       return /^y(es)?$/i.test(a.trim());
     },
+    onBackup: (rel, prior) => undoStack.push({ path: rel, prior }),
   };
 
   // 슬래시 명령 처리. true 를 반환하면 명령을 처리한 것.
@@ -128,9 +172,52 @@ async function main() {
           paint(C.green, arg ? `verify command = ${arg}\n` : "verify command cleared\n")
         );
         return true;
+      case "diag":
+        saveConfigValue("diagnosticsCommand", arg);
+        cfg = loadConfig();
+        process.stdout.write(
+          paint(C.green, arg ? `diagnostics command = ${arg}\n` : "diagnostics disabled\n")
+        );
+        return true;
+      case "undo": {
+        const last = undoStack.pop();
+        if (!last) {
+          process.stdout.write(paint(C.yellow, "nothing to undo\n"));
+          return true;
+        }
+        const abs = path.resolve(process.cwd(), last.path);
+        try {
+          if (last.prior === null) {
+            fs.rmSync(abs, { force: true });
+            process.stdout.write(paint(C.green, `undo: removed ${last.path} (was newly created)\n`));
+          } else {
+            fs.writeFileSync(abs, last.prior, "utf8");
+            process.stdout.write(paint(C.green, `undo: restored ${last.path}\n`));
+          }
+        } catch (e: any) {
+          process.stdout.write(paint(C.red, `undo failed: ${e?.message ?? e}\n`));
+        }
+        return true;
+      }
+      case "resume": {
+        const s = loadSession(process.cwd());
+        if (!s) {
+          process.stdout.write(paint(C.yellow, "no saved session for this project\n"));
+          return true;
+        }
+        history.length = 0;
+        history.push(...s.history);
+        plan.length = 0;
+        plan.push(...s.plan);
+        process.stdout.write(
+          paint(C.green, `resumed session (${s.history.length} messages, saved ${s.savedAt})\n`)
+        );
+        return true;
+      }
       case "clear":
         history.length = 0;
         plan.length = 0;
+        clearSession(process.cwd());
         process.stdout.write(paint(C.green, "conversation cleared\n"));
         return true;
       case "exit":
@@ -166,6 +253,7 @@ async function main() {
     } finally {
       io.endProgress();
       currentAbort = null;
+      saveSession(process.cwd(), history, plan); // 종료 후 /resume 으로 이어가기
       process.stdout.write("\n");
     }
   }

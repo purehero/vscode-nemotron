@@ -62,7 +62,9 @@ export interface AgentIO {
   writeTool: (text: string) => void;
   writeProgress: (text: string) => void;
   endProgress: () => void;
-  confirm: (summary: string) => Promise<boolean>;
+  confirm: (summary: string, diff?: string) => Promise<boolean>;
+  /** 편집 직전 원본 백업(/undo 용) */
+  onBackup?: (relPath: string, prior: string | null) => void;
 }
 
 function params(cfg: CliConfig): StreamParams {
@@ -184,6 +186,7 @@ export async function runAgentTurn(
       plan.push(...items);
       io.writeTool("📋 plan:\n" + formatPlan(items));
     },
+    onBackup: io.onBackup,
   };
 
   // system prompt: 기본 + 도구 지시문 + (메모리 지시문) + 메모리 블록 + 현재 계획
@@ -340,15 +343,34 @@ export async function runAgentTurn(
     usedTools = true;
     history.push({ role: "assistant", content: answer });
     const results: string[] = [];
+    let editedThisBatch = false;
     for (const call of calls) {
       if (signal.aborted) return;
       io.writeTool(`🔧 ${call.name}${callLabel(call)}`);
       const res = await runToolWithRetry(call, exec, io, signal);
       io.endProgress();
       io.writeTool(`  ↳ ${res.ok ? "✅" : "⚠️"} ${res.preview}`);
-      if (res.ok && WRITE_TOOLS.includes(call.name)) edited = true;
+      if (res.ok && WRITE_TOOLS.includes(call.name)) {
+        edited = true;
+        editedThisBatch = true;
+      }
       results.push(`[Tool ${call.name} result]\n${res.output}`);
     }
+
+    // 편집 후 자동 진단: 설정된 명령을 돌려 문제가 있으면 그 출력을 모델에 되먹임
+    const diagCmd = (cfg.diagnosticsCommand || "").trim();
+    if (editedThisBatch && diagCmd && !signal.aborted) {
+      io.writeTool(`🔍 diagnostics: ${diagCmd}`);
+      const dr = await execCommand(diagCmd, root, cfg.commandTimeout, io.writeProgress);
+      io.endProgress();
+      io.writeTool(`  ↳ ${dr.code === 0 ? "✅ clean" : `⚠️ issues (exit ${dr.code})`}`);
+      if (dr.code !== 0) {
+        results.push(
+          `[Diagnostics after your edits — \`${diagCmd}\` exited ${dr.code}. Fix these before finishing]\n${dr.output.slice(0, 6000)}`
+        );
+      }
+    }
+
     history.push({ role: "user", content: results.join("\n\n") });
   }
 

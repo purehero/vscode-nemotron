@@ -29,6 +29,8 @@ export interface CliConfig {
   maxContextChars: number;
   /** 원문 유지할 최신 도구 결과 개수(나머지는 규칙 압축) */
   toolResultFullCount: number;
+  /** 편집이 있었던 턴마다 자동 실행할 진단 명령(예: npx tsc --noEmit). 비었으면 비활성. */
+  diagnosticsCommand: string;
 }
 
 const DEFAULTS: Omit<CliConfig, "apiKey"> = {
@@ -49,6 +51,7 @@ const DEFAULTS: Omit<CliConfig, "apiKey"> = {
   maxMemoryChars: 4000,
   maxContextChars: 600000,
   toolResultFullCount: 3,
+  diagnosticsCommand: "",
 };
 
 export function configPath(): string {

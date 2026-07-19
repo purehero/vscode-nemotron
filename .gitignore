@@ -3,3 +3,4 @@ out/
 *.vsix
 cli/dist/
 cli/bin/
+.nemotron/session.json

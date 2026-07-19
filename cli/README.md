@@ -25,6 +25,19 @@ model stops mid-task, a completion gate (`/verify <build-or-test-cmd>`), and
 context-budget trimming (old tool outputs are compacted to stay within
 `maxContextChars`).
 
+Editing quality of life:
+
+- **Diff preview** — every write/edit shows a colorized diff before you approve.
+- **Whitespace-tolerant edits** — `edit_file` still matches when indentation or
+  spacing differs slightly, so edits fail far less often.
+- **`read_file` line ranges** — `offset`/`limit` to read a slice of a big file.
+- **`/undo`** — revert the last file edit (restores or deletes as appropriate).
+- **`/diag <cmd>`** — runs after every edit (e.g. `npx tsc --noEmit`); if it
+  reports problems, the output is fed back so the model fixes them. The CLI
+  suggests a command for your project type on startup.
+- **Sessions** — the conversation auto-saves to `.nemotron/session.json`; reopen
+  and `/resume` to continue where you left off.
+
 File writes and commands ask for confirmation unless auto-approve is on (`/auto`).
 
 ## Run it (needs Node 18+, works on Windows & macOS)
