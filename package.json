@@ -2,7 +2,7 @@
   "name": "nemotron-chat",
   "displayName": "Nemotron Chat",
   "description": "NVIDIA Nemotron AI chat and coding assistant for VSCode",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -159,10 +159,10 @@
         },
         "nemotron.temperature": {
           "type": "number",
-          "default": 1.0,
+          "default": 0.2,
           "minimum": 0,
           "maximum": 2,
-          "description": "temperature (0 ~ 2)"
+          "description": "temperature (0 ~ 2). Low values (~0.2) are recommended for coding: they reduce hallucinated APIs and inconsistent output. Raise it for brainstorming/creative tasks"
         },
         "nemotron.topP": {
           "type": "number",
@@ -231,6 +231,11 @@
           "default": 60000,
           "description": "run_command execution time limit (milliseconds)"
         },
+        "nemotron.verifyCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Completion gate: a build/test command (e.g. 'npm test' or 'npm run build'). When set, the AI cannot declare 'Task completed' after editing files until this command exits 0. On failure its output is fed back and the AI keeps working (up to 3 attempts). Leave empty to disable. Runs in the workspace root; uses the nemotron.commandTimeout limit"
+        },
         "nemotron.autoContext": {
           "type": "boolean",
           "default": true,
@@ -241,6 +246,12 @@
           "default": 40,
           "minimum": 0,
           "description": "Maximum API requests per minute (RPM). Waits automatically when exceeded. 0 = no limit"
+        },
+        "nemotron.maxRetries": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "description": "How many times to automatically retry a request that fails with a rate-limit/temporary error (HTTP 429/503/500) before giving up. Uses the Retry-After header when present, otherwise exponential backoff. 0 = no retry"
         },
         "nemotron.maxToolIterations": {
           "type": "number",
@@ -275,8 +286,8 @@
         },
         "nemotron.summarizeModel": {
           "type": "string",
-          "default": "",
-          "description": "Model used to summarize old tool outputs (only when nemotron.summarizeToolResults is on). Leave empty to reuse nemotron.model; set a smaller/cheaper model (e.g. a Nemotron Nano) to reduce cost"
+          "default": "nvidia/nemotron-3-super-120b-a12b",
+          "description": "Model used to summarize old tool outputs (only when nemotron.summarizeToolResults is on). Defaults to Nemotron 3 Super (cheaper than the 550B Ultra main model) so summarization doesn't run on the expensive model. Leave empty to reuse nemotron.model instead"
         },
         "nemotron.agents": {
           "type": "array",

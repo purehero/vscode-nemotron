@@ -101,6 +101,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   // API 요청 속도 제한 (RPM)
   private readonly limiter = new RateLimiter();
 
+  // 진단용 출력 채널 (오류 시 응답 상태·헤더·본문 기록)
+  private output?: vscode.OutputChannel;
+
   // 마지막 활성 텍스트 편집기 (웹뷰에 포커스가 있으면 activeTextEditor 가 비므로 기억해 둔다)
   private lastEditor?: vscode.TextEditor;
 
@@ -169,6 +172,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
       );
     });
+  }
+
+  /** 진단용 출력 채널 (지연 생성). "Nemotron" 이름으로 Output 패널에 나타난다. */
+  private out(): vscode.OutputChannel {
+    if (!this.output) {
+      this.output = vscode.window.createOutputChannel("Nemotron");
+    }
+    return this.output;
+  }
+
+  /**
+   * API 호출 오류의 상세 정보(상태코드·Retry-After·응답 헤더 전체·본문)를
+   * 출력 채널에 기록한다. 429/TPM 진단이나 숨은 헤더 확인에 쓴다.
+   */
+  private logApiError(context: string, model: string, err: any): void {
+    const ch = this.out();
+    ch.appendLine(`\n===== API error @ ${new Date().toISOString()} =====`);
+    ch.appendLine(`context : ${context}`);
+    ch.appendLine(`model   : ${model}`);
+    if (err?.status !== undefined) {
+      ch.appendLine(`status  : ${err.status}`);
+    }
+    if (typeof err?.retryAfterMs === "number") {
+      ch.appendLine(`retry-after : ${err.retryAfterMs} ms`);
+    }
+    if (err?.headers && typeof err.headers === "object") {
+      ch.appendLine("response headers :");
+      for (const [k, v] of Object.entries(err.headers)) {
+        ch.appendLine(`  ${k}: ${v}`);
+      }
+    }
+    const body = err?.body ?? err?.message ?? String(err);
+    const text = typeof body === "string" ? body : JSON.stringify(body);
+    ch.appendLine(`body :\n  ${text.slice(0, 4000)}`);
   }
 
   private getShell(): PersistentShell | undefined {
@@ -688,13 +725,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private params(): StreamParams {
     const c = vscode.workspace.getConfiguration("nemotron");
+    const enableThinking = c.get<boolean>("enableThinking", true);
+    const reasoningBudget = c.get<number>("reasoningBudget", 16384);
+    let maxTokens = c.get<number>("maxTokens", 16384);
+    // 안전장치: 사고(reasoning) 토큰도 출력 예산(max_tokens)에서 소비되므로,
+    // 사고 예산이 출력 예산에 육박하면 정작 답변이 남지 않을 수 있다.
+    // 사고가 켜져 있고 여유가 부족하면 답변용 여유분(4096)을 확보한다(사고 예산은 줄이지 않음).
+    const ANSWER_HEADROOM = 4096;
+    if (enableThinking && reasoningBudget > 0 && maxTokens < reasoningBudget + ANSWER_HEADROOM) {
+      maxTokens = reasoningBudget + ANSWER_HEADROOM;
+    }
     return {
       model: c.get<string>("model", "nvidia/nemotron-3-ultra-550b-a55b"),
       temperature: c.get<number>("temperature", 1.0),
       topP: c.get<number>("topP", 0.95),
-      maxTokens: c.get<number>("maxTokens", 16384),
-      reasoningBudget: c.get<number>("reasoningBudget", 16384),
-      enableThinking: c.get<boolean>("enableThinking", true),
+      maxTokens,
+      reasoningBudget,
+      enableThinking,
     };
   }
 
@@ -1202,6 +1249,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (err?.name === "AbortError") {
         return { ok: false, output: "sub-agent execution was stopped.", preview: "stopped" };
       }
+      this.logApiError(`sub-agent ${agent.name}`, agent.model, err);
       return {
         ok: false,
         output: `sub-agent '${agent.name}' (${agent.model}) call failed: ${String(err?.message ?? err)}`,
@@ -1439,6 +1487,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (err?.name === "AbortError") {
         return { ok: false, output: "Screen analysis was stopped.", preview: "stopped" };
       }
+      this.logApiError("capture_screen vision", model, err);
       return {
         ok: false,
         output:
@@ -1539,6 +1588,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (err?.name === "AbortError") {
         return { ok: false, output: "Image analysis was stopped.", preview: "stopped" };
       }
+      this.logApiError("analyze_image vision", model, err);
       return {
         ok: false,
         output:
@@ -2197,51 +2247,103 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     let continueNudges = 0;
     let truncationRetries = 0;
     let usedToolsThisTurn = false;
+    // 완료 게이트용: 이번 실행에서 파일 편집이 있었는지 + 검증 재시도 횟수
+    let editedThisRun = false;
+    let verifyRetries = 0;
 
     try {
       for (let iter = 0; ; iter++) {
-        // 요청 속도 제한 (기본 40 RPM)
-        const maxRpm = vscode.workspace
-          .getConfiguration("nemotron")
-          .get<number>("maxRpm", 40);
-        await this.limiter.acquire(maxRpm, {
-          signal: this.abort.signal,
-          onWait: (ms) =>
-            this.post({
-              type: "system",
-              text: `⏳ Rate limit (${maxRpm} RPM) — waiting about ${Math.ceil(
-                ms / 1000
-              )}s…`,
-            }),
-        });
+        // 요청 속도 제한 (기본 40 RPM) + 429/503/500 백오프 재시도
+        const cfg = vscode.workspace.getConfiguration("nemotron");
+        const maxRpm = cfg.get<number>("maxRpm", 40);
+        const maxRetries = Math.max(0, cfg.get<number>("maxRetries", 3));
 
-        this.liveAnswer = "";
-        this.liveReasoning = "";
-        this.post({ type: "botStart" });
         let answer = "";
         let finishReason = "";
+        // 429(속도제한)·503/500(일시적 과부하)은 백오프 후 자동 재시도한다.
+        // 이들은 스트림이 시작되기 전에 던져지므로, 아직 출력이 없을 때만 재시도해
+        // 이미 표시된 내용이 중복되지 않게 한다. 재시도 요청도 limiter 를 통과한다.
+        for (let sAttempt = 0; ; sAttempt++) {
+          await this.limiter.acquire(maxRpm, {
+            signal: this.abort.signal,
+            onWait: (ms) =>
+              this.post({
+                type: "system",
+                text: `⏳ Rate limit (${maxRpm} RPM) — waiting about ${Math.ceil(
+                  ms / 1000
+                )}s…`,
+              }),
+          });
 
-        for await (const ev of streamChat(
-          key,
-          this.buildMessages(withTools),
-          this.params(),
-          this.abort.signal
-        )) {
-          if (ev.type === "usage" && ev.usage) {
-            this.usage.prompt += ev.usage.prompt;
-            this.usage.completion += ev.usage.completion;
-            this.usage.total += ev.usage.total;
-            this.usage.requests += 1;
-            this.lastUsage = ev.usage;
-          } else if (ev.type === "reasoning") {
-            this.liveReasoning += ev.text ?? "";
-            this.post({ type: "reasoning", text: ev.text });
-          } else if (ev.type === "content") {
-            answer += ev.text ?? "";
-            this.liveAnswer = answer;
-            this.post({ type: "content", text: ev.text });
-          } else if (ev.type === "finish") {
-            finishReason = ev.finishReason ?? finishReason;
+          this.liveAnswer = "";
+          this.liveReasoning = "";
+          this.post({ type: "botStart" });
+          answer = "";
+          finishReason = "";
+
+          try {
+            for await (const ev of streamChat(
+              key,
+              this.buildMessages(withTools),
+              this.params(),
+              this.abort.signal
+            )) {
+              if (ev.type === "usage" && ev.usage) {
+                this.usage.prompt += ev.usage.prompt;
+                this.usage.completion += ev.usage.completion;
+                this.usage.total += ev.usage.total;
+                this.usage.requests += 1;
+                this.lastUsage = ev.usage;
+              } else if (ev.type === "reasoning") {
+                this.liveReasoning += ev.text ?? "";
+                this.post({ type: "reasoning", text: ev.text });
+              } else if (ev.type === "content") {
+                answer += ev.text ?? "";
+                this.liveAnswer = answer;
+                this.post({ type: "content", text: ev.text });
+              } else if (ev.type === "finish") {
+                finishReason = ev.finishReason ?? finishReason;
+              }
+            }
+            break; // 스트림 정상 완료
+          } catch (err: any) {
+            if (err?.name !== "AbortError") {
+              this.logApiError("main chat", this.params().model, err);
+              (err as any)._logged = true;
+            }
+            const status = err?.status;
+            const temporary = status === 429 || status === 503 || status === 500;
+            // 이미 내용이 출력된 뒤의 실패는 재시도 시 중복되므로 제외한다.
+            const retryable =
+              temporary &&
+              answer === "" &&
+              sAttempt < maxRetries &&
+              err?.name !== "AbortError" &&
+              !this.abort.signal.aborted;
+            if (!retryable) {
+              throw err;
+            }
+            this.post({ type: "dropLastBot" });
+            const backoff =
+              typeof err?.retryAfterMs === "number"
+                ? err.retryAfterMs
+                : Math.min(30_000, 1000 * 2 ** sAttempt); // 1s,2s,4s,… (최대 30s)
+            this.post({
+              type: "system",
+              text: `⏳ HTTP ${status} (rate limited) — retrying in ${Math.ceil(
+                backoff / 1000
+              )}s (${sAttempt + 1}/${maxRetries})`,
+            });
+            await this.raceAbort(
+              new Promise<string>((r) => setTimeout(() => r("ok"), backoff)),
+              "aborted"
+            );
+            if (this.abort.signal.aborted) {
+              const e = new Error("Aborted");
+              e.name = "AbortError";
+              throw e;
+            }
+            // 다음 시도로 계속
           }
         }
         this.post({ type: "botEnd" });
@@ -2323,6 +2425,77 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               hidden: true,
             });
             continue;
+          }
+          // 완료 게이트: 편집이 있었고 verifyCommand 가 설정돼 있으면, '작업 완료' 선언
+          // 전에 빌드/테스트를 강제로 돌린다. 실패하면 결과를 되먹여 계속 작업하게 한다(최대 3회).
+          const verifyCmd = cfg.get<string>("verifyCommand", "").trim();
+          const shell = this.getShell();
+          if (
+            withTools &&
+            verifyCmd &&
+            shell &&
+            editedThisRun &&
+            verifyRetries < 3 &&
+            declaresCompletion(answer) &&
+            !this.abort?.signal.aborted
+          ) {
+            this.post({
+              type: "tool",
+              name: "Verify",
+              detail: `Verifying before completion: ${verifyCmd}`,
+            });
+            const timeoutMs = cfg.get<number>("commandTimeout", 60000);
+            let vr;
+            try {
+              vr = await shell.run(verifyCmd, timeoutMs);
+            } catch {
+              vr = undefined;
+            }
+            if (vr && vr.code !== 0) {
+              verifyRetries++;
+              this.history.push({ role: "assistant", content: answer });
+              this.post({
+                type: "toolResult",
+                name: "Verify",
+                ok: false,
+                preview: `verify failed (exit ${vr.code ?? "?"}${
+                  vr.timedOut ? ", timeout" : ""
+                }) — continuing (${verifyRetries}/3)`,
+                output: vr.output.slice(0, 4000),
+              });
+              this.history.push({
+                role: "user",
+                content:
+                  `The verify command \`${verifyCmd}\` FAILED (exit code ${
+                    vr.code ?? "unknown"
+                  }${vr.timedOut ? ", timed out" : ""}), so the task is NOT complete. ` +
+                  `Fix the problems and do not declare completion until it passes.\n\n` +
+                  `[verify output]\n${vr.output.slice(0, 8000)}`,
+                hidden: true,
+              });
+              continue;
+            }
+            if (vr) {
+              this.post({
+                type: "toolResult",
+                name: "Verify",
+                ok: true,
+                preview: `verify passed (${verifyCmd})`,
+              });
+            }
+          } else if (
+            withTools &&
+            verifyCmd &&
+            shell &&
+            editedThisRun &&
+            verifyRetries >= 3 &&
+            declaresCompletion(answer)
+          ) {
+            // 검증이 3회 내내 실패 → 무한루프 방지를 위해 완료는 허용하되 사용자에게 명확히 경고
+            this.post({
+              type: "system",
+              text: `⚠️ Verify command \`${verifyCmd}\` still failing after 3 attempts — accepting completion anyway. Please review manually.`,
+            });
           }
           if (answer) {
             this.history.push({ role: "assistant", content: answer });
@@ -2468,6 +2641,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           )
         );
         if (editedPaths.length) {
+          editedThisRun = true; // 완료 게이트: 편집이 있었으므로 완료 선언 전 검증 필요
           for (const p of editedPaths) {
             try {
               // 닫힌 파일도 언어 서버가 분석하도록 유도한 뒤 진단 수집
@@ -2517,8 +2691,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.post({ type: "botEnd" });
         this.post({ type: "system", text: "⏹ Generation stopped." });
       } else {
+        if (!err?._logged) {
+          this.logApiError("chat", this.params().model, err);
+        }
+        this.out().show(true); // 오류 시 진단 로그를 자동으로 띄움(포커스는 뺏지 않음)
         this.post({ type: "botEnd" });
-        this.post({ type: "error", text: String(err?.message ?? err) });
+        this.post({
+          type: "error",
+          text: String(err?.message ?? err) + " — 자세한 내용: Output 패널 → Nemotron",
+        });
       }
     } finally {
       this.busy = false;
