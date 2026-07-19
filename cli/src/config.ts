@@ -19,6 +19,8 @@ export interface CliConfig {
   maxIterations: number;
   /** true 면 파일 쓰기·명령 실행을 묻지 않고 자동 승인 */
   autoApprove: boolean;
+  /** 완료 게이트: 편집이 있었고 이 값이 설정되면 '작업 완료' 선언 전 이 명령이 exit 0 이어야 함 */
+  verifyCommand: string;
 }
 
 const DEFAULTS: Omit<CliConfig, "apiKey"> = {
@@ -34,6 +36,7 @@ const DEFAULTS: Omit<CliConfig, "apiKey"> = {
   commandTimeout: 0,
   maxIterations: 50,
   autoApprove: false,
+  verifyCommand: "",
 };
 
 export function configPath(): string {

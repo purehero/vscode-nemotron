@@ -27,6 +27,7 @@ const HELP = [
   "  /key <API_KEY>   save your NVIDIA API key (~/.nemotron/config.json)",
   "  /model <id>      set the model id",
   "  /auto            toggle auto-approve for writes/commands",
+  "  /verify <cmd>    set a completion-gate command (build/test); empty to disable",
   "  /clear           clear the conversation",
   "  /exit            quit",
   "",
@@ -117,6 +118,13 @@ async function main() {
         cfg.autoApprove = !cfg.autoApprove;
         saveConfigValue("autoApprove", cfg.autoApprove);
         process.stdout.write(paint(C.green, `auto-approve = ${cfg.autoApprove}\n`));
+        return true;
+      case "verify":
+        saveConfigValue("verifyCommand", arg);
+        cfg = loadConfig();
+        process.stdout.write(
+          paint(C.green, arg ? `verify command = ${arg}\n` : "verify command cleared\n")
+        );
         return true;
       case "clear":
         history.length = 0;
