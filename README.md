@@ -91,6 +91,33 @@ vsce package         # produce nemotron-chat-<version>.vsix
 To develop interactively, open this folder in VSCode and press **F5**
 (Run Extension) to launch a new window with the extension loaded.
 
+### Development install (symlink) + `/update`
+
+For day-to-day use without repackaging a `.vsix` on every change, install the
+extension as a **symlink (junction) to your git checkout**. VSCode then loads
+the repo directly, so updating is just: pull → rebuild → reload.
+
+```powershell
+# Windows (PowerShell). Run once.
+$ext  = Join-Path $env:USERPROFILE ".vscode\extensions"
+$repo = "d:\myWorkspace\NemotronAPI\vscode-nemotron"   # this repo
+code --uninstall-extension local.nemotron-chat          # remove any .vsix copy
+Get-ChildItem $ext -Directory -Filter "local.nemotron-chat-*" |
+  ForEach-Object { Remove-Item $_.FullName -Recurse -Force }
+New-Item -ItemType Junction -Path (Join-Path $ext "local.nemotron-chat") -Target $repo
+# then fully restart VSCode
+```
+
+```bash
+# macOS / Linux (bash). Run once.
+ln -s "$PWD" "$HOME/.vscode/extensions/local.nemotron-chat"
+```
+
+Once installed this way, apply new changes with the **`/update`** slash command
+in the chat — it runs `git pull` + `npm install` + `npm run build` and offers to
+reload the window. (Or manually: `git pull && npm run build`, then
+**Reload Window**.) No `.vsix`, no reinstall.
+
 ## Quick Start
 
 1. Click the **Nemotron** icon in the activity bar.

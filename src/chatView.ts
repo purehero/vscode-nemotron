@@ -32,6 +32,9 @@ import {
 } from "./tools";
 import { RateLimiter } from "./rateLimiter";
 import { BackgroundJobs } from "./background";
+import * as cp from "child_process";
+import * as fs from "fs";
+import * as path from "path";
 
 // 빌드 시각: esbuild 의 define 로 주입된다 (tsc 는 이 선언으로 통과)
 declare const __BUILD_TIME__: string;
@@ -482,9 +485,93 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "diff":
         await this.toggleBool("showDiff", "Diff preview when approving changes");
         break;
+      case "update":
+        await this.selfUpdate();
+        break;
       case "clear":
         this.clear();
         break;
+    }
+  }
+
+  /** 확장 폴더에서 명령을 실행하고 출력을 모아 반환한다(자기 업데이트용). */
+  private execStep(
+    dir: string,
+    command: string
+  ): Promise<{ code: number | null; output: string }> {
+    return new Promise((resolve) => {
+      const child = cp.spawn(command, {
+        cwd: dir,
+        shell: true,
+        windowsHide: true,
+      });
+      let output = "";
+      const cap = (b: Buffer) => {
+        output += b.toString("utf8");
+      };
+      child.stdout?.on("data", cap);
+      child.stderr?.on("data", cap);
+      child.on("error", (e) =>
+        resolve({ code: null, output: output + "\n" + e.message })
+      );
+      child.on("close", (code) => resolve({ code, output }));
+    });
+  }
+
+  /**
+   * /update: git 에서 최신 코드를 받아 다시 빌드하고 창을 새로고침한다.
+   * repo 에 심볼릭 링크(개발 설치)된 경우에만 동작한다.
+   */
+  private async selfUpdate(): Promise<void> {
+    const dir = this.ctx.extensionUri.fsPath;
+    if (!fs.existsSync(path.join(dir, ".git"))) {
+      this.post({
+        type: "system",
+        text:
+          `⚠️ /update 는 확장이 git 저장소에 심볼릭 링크(개발 설치)로 설치돼 있어야 동작합니다.\n` +
+          `현재 확장 폴더가 git 체크아웃이 아닙니다:\n${dir}\n` +
+          `심링크 개발 설치를 하거나, vsce package + 설치로 수동 업데이트하세요.`,
+      });
+      return;
+    }
+    this.post({ type: "system", text: "🔄 git 에서 업데이트 중…" });
+    const steps = [
+      { label: "git pull", cmd: "git pull --ff-only" },
+      { label: "npm install", cmd: "npm install" },
+      { label: "npm run build", cmd: "npm run build" },
+    ];
+    for (const step of steps) {
+      this.post({ type: "tool", name: "Update", detail: step.cmd });
+      const r = await this.execStep(dir, step.cmd);
+      if (r.code !== 0) {
+        this.post({
+          type: "toolResult",
+          name: "Update",
+          ok: false,
+          preview: `${step.label} 실패 (exit ${r.code ?? "?"})`,
+          output: r.output.slice(-4000),
+        });
+        this.post({
+          type: "system",
+          text: `❌ 업데이트가 "${step.label}" 단계에서 중단되었습니다.`,
+        });
+        return;
+      }
+      this.post({
+        type: "toolResult",
+        name: "Update",
+        ok: true,
+        preview: `${step.label} ✓`,
+        output: r.output.slice(-2000),
+      });
+    }
+    const pick = await vscode.window.showInformationMessage(
+      "Nemotron 업데이트 완료. 적용하려면 창을 새로고침하세요.",
+      "새로고침",
+      "나중에"
+    );
+    if (pick === "새로고침") {
+      await vscode.commands.executeCommand("workbench.action.reloadWindow");
     }
   }
 
