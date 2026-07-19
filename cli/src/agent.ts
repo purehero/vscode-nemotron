@@ -67,6 +67,8 @@ export interface AgentIO {
   onBackup?: (relPath: string, prior: string | null) => void;
   /** 도구 호출 한도 도달 시 계속할지 확인 (auto 모드가 아닐 때만 호출됨) */
   confirmContinue: (count: number) => Promise<boolean>;
+  /** 일시정지 게이트: 일시정지 중이면 재개/중단까지 대기(안전 지점에서 호출) */
+  checkpoint?: () => Promise<void>;
 }
 
 function params(cfg: CliConfig): StreamParams {
@@ -241,6 +243,8 @@ export async function runAgentTurn(
     }
     iter++;
     if (signal.aborted) return;
+    if (io.checkpoint) await io.checkpoint(); // ESC 일시정지 게이트
+    if (signal.aborted) return;
 
     const messages: ChatMessage[] = [
       { role: "system", content: buildSystem() },
@@ -369,6 +373,8 @@ export async function runAgentTurn(
     const results: string[] = [];
     let editedThisBatch = false;
     for (const call of calls) {
+      if (signal.aborted) return;
+      if (io.checkpoint) await io.checkpoint(); // 도구 실행 전 일시정지 확인
       if (signal.aborted) return;
       io.writeTool(`🔧 ${call.name}${callLabel(call)}`);
       const res = await runToolWithRetry(call, exec, io, signal);

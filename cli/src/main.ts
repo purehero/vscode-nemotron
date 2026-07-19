@@ -49,6 +49,7 @@ const HELP = [
   "  /clear           clear the conversation",
   "  /exit            quit",
   "",
+  "Keys (while it's working): ESC = pause, ESC again = stop, Enter = resume;  Shift+Tab = toggle auto mode.",
   "Tip: set the key once via env var NVIDIA_API_KEY, or /key. Run from your project root.",
 ].join("\n");
 
@@ -64,9 +65,23 @@ async function main() {
   });
 
   let currentAbort: AbortController | null = null;
+  let turnActive = false;
+  let turnPaused = false;
+  let resumeWaiters: (() => void)[] = [];
+  const resumeTurn = () => {
+    turnPaused = false;
+    const waiters = resumeWaiters;
+    resumeWaiters = [];
+    waiters.forEach((r) => r());
+  };
+  const stopTurn = () => {
+    currentAbort?.abort();
+    resumeTurn(); // 일시정지 대기 중이면 깨워서 중단되게
+  };
+
   rl.on("SIGINT", () => {
     if (currentAbort) {
-      currentAbort.abort();
+      stopTurn();
       process.stdout.write(paint(C.yellow, "\n⏹ stopped\n"));
     } else {
       rl.close();
@@ -74,10 +89,60 @@ async function main() {
     }
   });
 
+  // 키 입력: ESC(1회 일시정지 / 2회 정지), Shift+Tab(auto 토글), 일시정지 중 Enter=재개
+  readline.emitKeypressEvents(process.stdin, rl);
+  process.stdin.on("keypress", (_str, key) => {
+    if (!key) return;
+    // Shift+Tab → auto 모드 토글 (언제든)
+    if (key.name === "tab" && key.shift) {
+      cfg.autoApprove = !cfg.autoApprove;
+      saveConfigValue("autoApprove", cfg.autoApprove);
+      process.stdout.write(
+        paint(C.green, `\n⚡ auto mode = ${cfg.autoApprove ? "ON" : "off"}\n`)
+      );
+      return;
+    }
+    if (!turnActive) return;
+    if (key.name === "escape") {
+      if (!turnPaused) {
+        turnPaused = true;
+        process.stdout.write(
+          paint(C.yellow, "\n⏸ paused — ESC again to stop, Enter to resume\n")
+        );
+      } else {
+        process.stdout.write(paint(C.yellow, "\n⏹ stopped\n"));
+        stopTurn();
+      }
+      return;
+    }
+    if (key.name === "return" && turnPaused) {
+      process.stdout.write(paint(C.green, "▶ resumed\n"));
+      resumeTurn();
+    }
+  });
+  // 작업 중에도 키 입력이 잡히도록 raw 모드 유지(종료 시 복원)
+  if (process.stdin.isTTY) {
+    try {
+      process.stdin.setRawMode(true);
+    } catch {
+      /* 비TTY(파이프)면 무시 */
+    }
+  }
+  const restoreTty = () => {
+    if (process.stdin.isTTY) {
+      try {
+        process.stdin.setRawMode(false);
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+  process.on("exit", restoreTty);
+
   process.stdout.write(
     paint(C.cyan, "nemotron") +
       paint(C.gray, ` — terminal coding agent  (cwd: ${process.cwd()})\n`) +
-      paint(C.gray, "Type a message, or /help. Ctrl+C stops a running turn.\n\n")
+      paint(C.gray, "Type a message, or /help.  ESC = pause (ESC again = stop) · Shift+Tab = auto mode\n\n")
   );
   if (!cfg.apiKey) {
     process.stdout.write(
@@ -132,6 +197,11 @@ async function main() {
       return /^y(es)?$/i.test(a.trim());
     },
     onBackup: (rel, prior) => undoStack.push({ path: rel, prior }),
+    checkpoint: async () => {
+      while (turnPaused && !currentAbort?.signal.aborted) {
+        await new Promise<void>((res) => resumeWaiters.push(res));
+      }
+    },
     confirmContinue: async (count) => {
       if (cfg.autoApprove) return true;
       const a = await ask(
@@ -259,11 +329,15 @@ async function main() {
     }
     history.push({ role: "user", content: input });
     currentAbort = new AbortController();
+    turnActive = true;
     try {
       await runAgentTurn(history, plan, cfg, io, currentAbort.signal);
     } catch (e: any) {
       io.writeSystem(`error: ${e?.message ?? e}`);
     } finally {
+      turnActive = false;
+      turnPaused = false;
+      resumeWaiters = [];
       io.endProgress();
       currentAbort = null;
       saveSession(process.cwd(), history, plan); // 종료 후 /resume 으로 이어가기

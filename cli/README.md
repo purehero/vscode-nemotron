@@ -39,9 +39,13 @@ Editing quality of life:
   and `/resume` to continue where you left off.
 
 File writes and commands ask for confirmation, and the CLI checks in when it has
-made a lot of tool calls in one turn. Toggle **auto mode** with `/auto` to
-auto-approve writes/commands **and** keep working past the tool-call limit
-(up to a hard safety cap) without stopping to ask — `Ctrl+C` still halts it.
+made a lot of tool calls in one turn. Toggle **auto mode** with `/auto` (or
+**Shift+Tab**) to auto-approve writes/commands **and** keep working past the
+tool-call limit (up to a hard safety cap) without stopping to ask.
+
+**Keyboard while it's working:** **ESC** pauses at the next safe point (between
+steps), **ESC again** stops the turn, **Enter** resumes; **Shift+Tab** toggles
+auto mode. `Ctrl+C` also stops (press again at the prompt to quit).
 
 ## Run it (needs Node 18+, works on Windows & macOS)
 
