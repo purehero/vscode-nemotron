@@ -425,6 +425,38 @@ export function hasToolAttempt(text: string): boolean {
   );
 }
 
+/**
+ * ```tool 블록(또는 JSON)에서 "존재하지 않는 도구 이름"을 호출하려 한 경우
+ * 그 이름을 돌려준다. (예: 제거된 check_command, 오타 등) 없으면 null.
+ * 형식은 맞는데 이름만 틀린 경우를 짚어 정확히 안내하기 위함.
+ */
+export function unknownToolAttempt(text: string): string | null {
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*```tool\s*$/.test(lines[i])) {
+      let j = i + 1;
+      while (j < lines.length && lines[j].trim() === "") {
+        j++;
+      }
+      const first = j < lines.length ? lines[j].trim() : "";
+      // 라인 형식의 첫 줄이 '도구 이름'처럼 보이는데 유효하지 않은 경우
+      if (first && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(first) && !isToolName(first)) {
+        return first;
+      }
+    }
+  }
+  const m = text.match(/"name"\s*:\s*"([a-zA-Z_][a-zA-Z0-9_]*)"/);
+  if (m && !isToolName(m[1])) {
+    return m[1];
+  }
+  return null;
+}
+
+/** 유효한 도구 이름 목록(모델 교정 안내용). */
+export function toolNameList(): string {
+  return (TOOL_NAMES as readonly string[]).join(", ");
+}
+
 function workspaceRoot(): vscode.Uri {
   const r = vscode.workspace.workspaceFolders?.[0];
   if (!r) {

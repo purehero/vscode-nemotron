@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- "Format error — could not recognize the tool-call format" no longer loops.
+  When the model calls a tool that does not exist (e.g. a removed or misspelled
+  name), it is now told exactly that ("No such tool: X") with the list of valid
+  tools, instead of a generic format message. These retries are capped at 3 per
+  turn so a bad tool name can no longer spin until the tool-call limit.
+
 ### Changed
 
 - `run_command` no longer times out on long-running commands. It runs in the
