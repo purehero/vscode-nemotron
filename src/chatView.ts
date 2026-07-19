@@ -357,7 +357,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await vscode.commands.executeCommand("nemotron.setApiKey");
         break;
       case "command":
-        await this.handleCommand(String(msg.name ?? ""));
+        await this.handleCommand(String(msg.name ?? ""), String(msg.args ?? ""));
         break;
       case "codeAction":
         await this.handleCodeAction(String(msg.action ?? ""), String(msg.code ?? ""));
@@ -414,8 +414,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  /** 슬래시(/) 명령 처리 */
-  private async handleCommand(name: string): Promise<void> {
+  /** 슬래시(/) 명령 처리 (args: 명령 뒤에 붙은 인자 문자열, 예: "/update develop") */
+  private async handleCommand(name: string, args = ""): Promise<void> {
     switch (name) {
       case "model":
         await this.pickModel();
@@ -505,7 +505,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.toggleBool("showDiff", "Diff preview when approving changes");
         break;
       case "update":
-        await this.selfUpdate();
+        await this.selfUpdate(args);
         break;
       case "clear":
         this.clear();
@@ -541,7 +541,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * /update: git 에서 최신 코드를 받아 다시 빌드하고 창을 새로고침한다.
    * repo 에 심볼릭 링크(개발 설치)된 경우에만 동작한다.
    */
-  private async selfUpdate(): Promise<void> {
+  private async selfUpdate(branchArg?: string): Promise<void> {
     const dir = this.ctx.extensionUri.fsPath;
     if (!fs.existsSync(path.join(dir, ".git"))) {
       this.post({
@@ -553,9 +553,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       });
       return;
     }
-    this.post({ type: "system", text: "🔄 git 에서 업데이트 중…" });
+    // 기본 master. 인자로 브랜치명을 받되, 셸에 들어가므로 안전한 문자만 허용.
+    const branch = (branchArg || "").trim() || "master";
+    if (!/^[A-Za-z0-9._/-]+$/.test(branch)) {
+      this.post({
+        type: "system",
+        text: `⚠️ 잘못된 브랜치 이름입니다: "${branch}" (영문/숫자/. _ / - 만 허용)`,
+      });
+      return;
+    }
+    this.post({ type: "system", text: `🔄 git(${branch})에서 업데이트 중…` });
     const steps = [
-      { label: "git pull", cmd: "git pull --ff-only" },
+      { label: `git checkout ${branch}`, cmd: `git checkout ${branch}` },
+      { label: `git pull (${branch})`, cmd: `git pull --ff-only origin ${branch}` },
       { label: "npm install", cmd: "npm install" },
       { label: "npm run build", cmd: "npm run build" },
     ];

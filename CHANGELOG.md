@@ -9,12 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `/update` self-update command: pulls the latest code from git, runs
+- `/update` self-update command: checks out a branch (default `master`, or pass
+  one e.g. `/update develop`), pulls the latest code from git, runs
   `npm install` + `npm run build`, and offers to reload the window — so new
   features are applied without manually packaging/installing a `.vsix`. Requires
   the extension to be installed as a symlink (junction) to its git checkout; if
   it is not a git checkout the command explains how to set that up. See the
-  "Development install" section in the README.
+  "Development install" section in the README. Slash commands now accept
+  arguments (`/command arg`).
 
 - Background commands: `run_command` no longer fails long-running commands
   (builds, installs, full test suites, dev servers) on the timeout. Commands run

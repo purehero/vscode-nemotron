@@ -377,7 +377,7 @@
     { name: "save", desc: "Save the current conversation" },
     { name: "load", desc: "Load a saved conversation" },
     { name: "diff", desc: "Toggle diff preview on change approval" },
-    { name: "update", desc: "Update from git and rebuild (dev symlink install)" },
+    { name: "update", desc: "Update from git [branch] (default master) and rebuild" },
     { name: "clear", desc: "Clear the conversation" },
   ];
   const slashMenu = document.getElementById("slash-menu");
@@ -444,6 +444,19 @@
   function send() {
     const text = promptEl.value.trim();
     if (!text || busy) return;
+    // "/명령 인자" (예: /update develop) → 알려진 명령이면 command 로 라우팅
+    const m = text.match(/^\/(\w+)(?:\s+([\s\S]*))?$/);
+    if (m && COMMANDS.some((c) => c.name === m[1])) {
+      pushInputHistory(text);
+      promptEl.value = "";
+      promptEl.style.height = "auto";
+      vscode.postMessage({
+        type: "command",
+        name: m[1],
+        args: (m[2] || "").trim(),
+      });
+      return;
+    }
     pushInputHistory(text);
     promptEl.value = "";
     promptEl.style.height = "auto";

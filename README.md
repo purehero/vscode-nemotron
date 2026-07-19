@@ -114,9 +114,10 @@ ln -s "$PWD" "$HOME/.vscode/extensions/local.nemotron-chat"
 ```
 
 Once installed this way, apply new changes with the **`/update`** slash command
-in the chat — it runs `git pull` + `npm install` + `npm run build` and offers to
-reload the window. (Or manually: `git pull && npm run build`, then
-**Reload Window**.) No `.vsix`, no reinstall.
+in the chat — it checks out a branch (default **`master`**), runs `git pull` +
+`npm install` + `npm run build`, and offers to reload the window. Pass a branch
+name to update from a different branch, e.g. `/update develop`. (Or manually:
+`git pull && npm run build`, then **Reload Window**.) No `.vsix`, no reinstall.
 
 ## Quick Start
 
