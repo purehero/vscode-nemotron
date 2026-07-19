@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `check_command` polling no longer spams the chat: instead of appending a new
+  line on every poll, it updates a single line in place (per job id) so the
+  elapsed time just ticks up.
+
 ### Added
 
 - `/update` self-update command: checks out a branch (default `master`, or pass

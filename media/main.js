@@ -22,6 +22,7 @@
 
   let busy = false;
   let current = null; // 현재 봇 메시지 핸들 {body, thinkEl, thinkBody, answer, reasoning}
+  let liveLines = {}; // 제자리 갱신 도구 라인 (check_command 폴링): key(잡 id) → 요소
 
   // ── 입력 히스토리 (최근 10개, ↑/↓ 로 탐색) ──
   const HISTORY_MAX = 10;
@@ -214,6 +215,21 @@
     chat.appendChild(pre);
     scrollDown();
   }
+  // check_command 폴링: 매번 새 줄을 쌓지 않고 잡별로 한 줄을 제자리 갱신한다.
+  function updateLiveTool(m) {
+    const key = (m.preview || "").split(/\s/)[0] || m.name;
+    let el = liveLines[key];
+    if (!el || !el.isConnected) {
+      clearEmptyHint();
+      el = document.createElement("div");
+      el.className = "tool-line";
+      chat.appendChild(el);
+      liveLines[key] = el;
+    }
+    el.className = "tool-line" + (m.ok ? "" : " tool-fail");
+    el.textContent = (m.ok ? "  ↳ 🔄 " : "  ↳ ⚠️ ") + (m.preview || m.name);
+    scrollDown();
+  }
   // ── 작업 계획 패널 렌더링 ──
   function renderPlan(items) {
     if (!Array.isArray(items) || items.length === 0) {
@@ -308,9 +324,15 @@
         dropLastBot();
         break;
       case "tool":
+        // check_command 는 폴링이라 헤더 줄을 만들지 않고 결과 한 줄만 제자리 갱신
+        if (m.name === "check_command") break;
         addTool("🔧 " + m.name + (m.detail ? "  " + m.detail : ""), "tool-call");
         break;
       case "toolResult":
+        if (m.name === "check_command") {
+          updateLiveTool(m);
+          break;
+        }
         addTool(
           (m.ok ? "  ↳ ✅ " : "  ↳ ⚠️ ") + (m.preview || m.name),
           m.ok ? "" : "tool-fail"
@@ -344,6 +366,7 @@
       case "clear":
         chat.innerHTML = "";
         current = null;
+        liveLines = {};
         showEmptyHint();
         break;
     }
