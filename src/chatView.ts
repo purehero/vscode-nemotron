@@ -2384,6 +2384,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     let continueNudges = 0;
     let truncationRetries = 0;
     let formatRetries = 0;
+    let unknownToolRetries = 0;
     let usedToolsThisTurn = false;
     // 완료 게이트용: 이번 실행에서 파일 편집이 있었는지 + 검증 재시도 횟수
     let editedThisRun = false;
@@ -2518,50 +2519,70 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         // 도구 호출이 없으면 최종 답변으로 확정하고 종료
         if (calls.length === 0) {
-          // 도구를 시도했으나 형식이 깨진 경우: JSON 을 답변으로 남기지 말고 교정 요청
-          if (
-            withTools &&
-            hasToolAttempt(answer) &&
-            formatRetries < 3 &&
-            iter < iterBudget
-          ) {
+          // 도구를 시도했으나 파싱이 안 된 경우: JSON 을 답변으로 남기지 말고 교정 요청.
+          if (withTools && hasToolAttempt(answer) && iter < iterBudget) {
+            // ⓐ 존재하지 않는 도구 이름을 부른 경우(제거된 check_command·오타 등):
+            //    재시도해도 같은 실수를 반복하기 쉬우므로 3회로 제한한다.
+            const badTool = unknownToolAttempt(answer);
+            if (badTool) {
+              unknownToolRetries++;
+              if (unknownToolRetries > 3) {
+                this.post({
+                  type: "system",
+                  text: `⚠️ Kept calling a tool that doesn't exist ("${badTool}") — stopping. Available tools: ${toolNameList()}.`,
+                });
+                if (answer) {
+                  this.history.push({ role: "assistant", content: answer });
+                }
+                break;
+              }
+              this.history.push({ role: "assistant", content: answer, hidden: true });
+              this.post({ type: "dropLastBot" });
+              this.post({
+                type: "tool",
+                name: "Format error",
+                detail: `No such tool: ${badTool} — retrying (${unknownToolRetries}/3)`,
+              });
+              this.history.push({
+                role: "user",
+                content:
+                  `There is no tool named "${badTool}", so nothing was run. ` +
+                  `The available tools are: ${toolNameList()}. ` +
+                  `If you were waiting for a long-running command, note that run_command already waits for it to finish and returns the result — do not poll. ` +
+                  `Call a valid tool using the exact format, or if the task is done, write the final answer with no tool call.`,
+                hidden: true,
+              });
+              continue;
+            }
+            // ⓑ 유효한 도구인데 형식만 틀린 경우: 모델이 몇 번 만에 스스로 교정하는
+            //    일이 많으므로(예: run_command) 넉넉히 허용하고, 안 되면 그때 멈춘다.
             formatRetries++;
+            if (formatRetries > 8) {
+              this.post({
+                type: "system",
+                text: "⚠️ Could not parse a valid tool call after several attempts — stopping. Please rephrase or try again.",
+              });
+              if (answer) {
+                this.history.push({ role: "assistant", content: answer });
+              }
+              break;
+            }
             this.history.push({ role: "assistant", content: answer, hidden: true });
             this.post({ type: "dropLastBot" });
-            // 존재하지 않는 도구 이름을 호출한 경우(제거된 check_command·오타 등)엔
-            // 형식이 아니라 '그 도구가 없다'는 걸 정확히 알려준다.
-            const badTool = unknownToolAttempt(answer);
             this.post({
               type: "tool",
               name: "Format error",
-              detail: badTool
-                ? `No such tool: ${badTool} — retrying (${formatRetries}/3)`
-                : `Could not recognize the tool-call format; retrying (${formatRetries}/3)`,
+              detail: `Could not recognize the tool-call format; retrying (${formatRetries}/8)`,
             });
             this.history.push({
               role: "user",
-              content: badTool
-                ? `There is no tool named "${badTool}", so nothing was run. ` +
-                  `The available tools are: ${toolNameList()}. ` +
-                  `If you were waiting for a long-running command, note that run_command already waits for it to finish and returns the result — do not poll. ` +
-                  `Call a valid tool using the exact format, or if the task is done, write the final answer with no tool call.`
-                : "The previous tool call was not run because its format was invalid. " +
-                  "Call it again following the exact format (```tool code block, tool name on the first line, key: value, and multi-line text in <<<OLD/<<<NEW/<<<END or <<<CONTENT/<<<END blocks). " +
-                  "Do not put multi-line code inside a JSON string.",
+              content:
+                "The previous tool call was not run because its format was invalid. " +
+                "Call it again following the exact format (```tool code block, tool name on the first line, key: value, and multi-line text in <<<OLD/<<<NEW/<<<END or <<<CONTENT/<<<END blocks). " +
+                "Do not put multi-line code inside a JSON string.",
               hidden: true,
             });
             continue;
-          }
-          // 형식 오류가 3회 반복되면 루프를 멈춘다(무한 재시도 방지).
-          if (withTools && hasToolAttempt(answer) && formatRetries >= 3) {
-            this.post({
-              type: "system",
-              text: "⚠️ Could not parse a valid tool call after 3 attempts — stopping. Please rephrase or try again.",
-            });
-            if (answer) {
-              this.history.push({ role: "assistant", content: answer });
-            }
-            break;
           }
           // 자동 이어가기 판정:
           // ① "~하겠습니다" 작업 예고 후 도구 호출 없이 끝남 (도구 미사용 턴 포함)
@@ -2669,6 +2690,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // 도구 호출 턴: 화면의 JSON 말풍선을 걷어내고 도구 활동으로 대체
         usedToolsThisTurn = true;
         formatRetries = 0; // 유효한 도구 호출 성공 → 형식오류 카운터 리셋
+        unknownToolRetries = 0;
         this.history.push({ role: "assistant", content: answer, hidden: true });
         this.post({ type: "dropLastBot" });
 

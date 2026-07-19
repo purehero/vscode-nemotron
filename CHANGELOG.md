@@ -9,11 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- "Format error — could not recognize the tool-call format" no longer loops.
-  When the model calls a tool that does not exist (e.g. a removed or misspelled
-  name), it is now told exactly that ("No such tool: X") with the list of valid
-  tools, instead of a generic format message. These retries are capped at 3 per
-  turn so a bad tool name can no longer spin until the tool-call limit.
+- "Format error — could not recognize the tool-call format" is handled better.
+  A call to a tool that does not exist (e.g. a removed or misspelled name) is now
+  answered with "No such tool: X" plus the list of valid tools and is capped at 3
+  attempts, so it can no longer spin until the tool-call limit. A genuine
+  formatting slip on a valid tool (which models usually self-correct after a few
+  tries) is allowed up to 8 retries before giving up, so a command that only
+  succeeds on, say, the 6th attempt is not cut off early. Stopping on repeated
+  format errors only ends the turn — it never kills an already-running command
+  (only the Stop button does that).
 
 ### Changed
 
