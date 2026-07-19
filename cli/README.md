@@ -38,7 +38,10 @@ Editing quality of life:
 - **Sessions** — the conversation auto-saves to `.nemotron/session.json`; reopen
   and `/resume` to continue where you left off.
 
-File writes and commands ask for confirmation unless auto-approve is on (`/auto`).
+File writes and commands ask for confirmation, and the CLI checks in when it has
+made a lot of tool calls in one turn. Toggle **auto mode** with `/auto` to
+auto-approve writes/commands **and** keep working past the tool-call limit
+(up to a hard safety cap) without stopping to ask — `Ctrl+C` still halts it.
 
 ## Run it (needs Node 18+, works on Windows & macOS)
 

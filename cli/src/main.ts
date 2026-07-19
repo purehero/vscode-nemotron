@@ -5,7 +5,7 @@ import * as readline from "readline";
 import * as fs from "fs";
 import * as path from "path";
 import { ChatMessage } from "../../src/nemotron";
-import { loadConfig, saveConfigValue, configPath, CliConfig } from "./config";
+import { loadConfig, saveConfigValue, configPath } from "./config";
 import { runAgentTurn, AgentIO } from "./agent";
 import { PlanItem } from "./tools";
 import { saveSession, loadSession, clearSession } from "./session";
@@ -41,7 +41,7 @@ const HELP = [
   "  /help            show this help",
   "  /key <API_KEY>   save your NVIDIA API key (~/.nemotron/config.json)",
   "  /model <id>      set the model id",
-  "  /auto            toggle auto-approve for writes/commands",
+  "  /auto            toggle auto mode: auto-approve writes/commands + keep going past the tool-call limit",
   "  /verify <cmd>    set a completion-gate command (build/test); empty to disable",
   "  /diag <cmd>      run this after each edit and feed problems back; empty to disable",
   "  /undo            revert the last file edit",
@@ -132,6 +132,14 @@ async function main() {
       return /^y(es)?$/i.test(a.trim());
     },
     onBackup: (rel, prior) => undoStack.push({ path: rel, prior }),
+    confirmContinue: async (count) => {
+      if (cfg.autoApprove) return true;
+      const a = await ask(
+        rl,
+        paint(C.yellow, `\n⚠️ ${count} tool calls so far. Keep going? [y/N] (or /auto for automatic) `)
+      );
+      return /^y(es)?$/i.test(a.trim());
+    },
   };
 
   // 슬래시 명령 처리. true 를 반환하면 명령을 처리한 것.
@@ -163,7 +171,12 @@ async function main() {
       case "auto":
         cfg.autoApprove = !cfg.autoApprove;
         saveConfigValue("autoApprove", cfg.autoApprove);
-        process.stdout.write(paint(C.green, `auto-approve = ${cfg.autoApprove}\n`));
+        process.stdout.write(
+          paint(
+            C.green,
+            `auto mode = ${cfg.autoApprove ? "ON ⚡ (auto-approve + auto-extend the tool-call limit)" : "off"}\n`
+          )
+        );
         return true;
       case "verify":
         saveConfigValue("verifyCommand", arg);

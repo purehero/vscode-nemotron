@@ -65,6 +65,8 @@ export interface AgentIO {
   confirm: (summary: string, diff?: string) => Promise<boolean>;
   /** 편집 직전 원본 백업(/undo 용) */
   onBackup?: (relPath: string, prior: string | null) => void;
+  /** 도구 호출 한도 도달 시 계속할지 확인 (auto 모드가 아닐 때만 호출됨) */
+  confirmContinue: (count: number) => Promise<boolean>;
 }
 
 function params(cfg: CliConfig): StreamParams {
@@ -214,7 +216,29 @@ export async function runAgentTurn(
   let usedTools = false;
   let edited = false;
 
-  while (iter < cfg.maxIterations) {
+  let iterBudget = cfg.maxIterations;
+  const HARD_CAP = 500; // auto 모드 폭주 방지 절대 상한
+
+  for (;;) {
+    if (signal.aborted) return;
+    // 도구 호출 한도 도달: auto 면 자동 연장, 아니면 계속할지 확인
+    if (iter >= iterBudget) {
+      if (iterBudget >= HARD_CAP) {
+        io.writeSystem(`⚠️ Reached the hard tool-call cap (${HARD_CAP}). Stopping.`);
+        return;
+      }
+      if (cfg.autoApprove) {
+        iterBudget = Math.min(HARD_CAP, iterBudget + cfg.maxIterations);
+        io.writeSystem(`⚡ Auto-mode: extended the tool-call limit to ${iterBudget}.`);
+      } else {
+        const cont = await io.confirmContinue(iter);
+        if (!cont) {
+          io.writeSystem(`⚠️ Stopped at the tool-call limit (${iter}). Toggle /auto to keep going automatically.`);
+          return;
+        }
+        iterBudget += cfg.maxIterations;
+      }
+    }
     iter++;
     if (signal.aborted) return;
 
@@ -373,6 +397,4 @@ export async function runAgentTurn(
 
     history.push({ role: "user", content: results.join("\n\n") });
   }
-
-  io.writeSystem(`⚠️ Reached the max tool-call limit (${cfg.maxIterations}).`);
 }
