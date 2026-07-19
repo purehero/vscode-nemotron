@@ -23,9 +23,9 @@ host (Node.js), there are no CORS issues.
   | `edit_file` | Partial edit via `<<<OLD/<<<NEW/<<<END` blocks (no whole-file rewrites) |
   | `apply_bytes` | Byte-level partial edit using before/after files (for special characters / large content) |
   | `write_file` | Create or fully replace a file |
-  | `run_command` | Run a terminal command and inspect output (persistent bash session); `background: true` runs long tasks detached |
-  | `check_command` | Poll a background command for new output and its exit status |
-  | `stop_command` | Terminate a background command |
+  | `run_command` | Run a terminal command. Runs as a background job: quick commands return output inline, long ones (builds/installs/tests/servers) keep running past the timeout and return a job id instead of failing |
+  | `check_command` | Poll a running command for new output and its exit status |
+  | `stop_command` | Terminate a running command |
   | `get_diagnostics` | Read editor errors/warnings (with a GDScript CLI fallback) |
   | `list_symbols` | List document or workspace symbols (language server) |
   | `find_definition` | Find a symbol's definition (language server) |
@@ -112,7 +112,6 @@ Settings live under `nemotron.*` in `settings.json`. Common ones:
 | `nemotron.autoMode` | `false` | Auto-approve edits and commands |
 | `nemotron.maxRpm` | `40` | Max API requests per minute |
 | `nemotron.maxToolIterations` | `25` | Max tool-call round trips per request |
-| `nemotron.persistentShell` | `true` | Keep a persistent shell for `run_command` |
 | `nemotron.agents` | (see settings) | Sub-agent definitions for `run_agent` |
 
 See the Settings UI (`/settings`) for the full list, including temperature,

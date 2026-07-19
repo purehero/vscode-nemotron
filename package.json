@@ -2,7 +2,7 @@
   "name": "nemotron-chat",
   "displayName": "Nemotron Chat",
   "description": "NVIDIA Nemotron AI chat and coding assistant for VSCode",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -229,12 +229,12 @@
         "nemotron.commandTimeout": {
           "type": "number",
           "default": 60000,
-          "description": "run_command execution time limit (milliseconds)"
+          "description": "run_command grace period (milliseconds). Every command runs as a background job; if it finishes within this window its full output is returned inline, otherwise it keeps running in the background and a job id is returned to poll with check_command. Commands are never killed for exceeding this — it only decides how long to wait inline before handing back a job id."
         },
         "nemotron.verifyCommand": {
           "type": "string",
           "default": "",
-          "description": "Completion gate: a build/test command (e.g. 'npm test' or 'npm run build'). When set, the AI cannot declare 'Task completed' after editing files until this command exits 0. On failure its output is fed back and the AI keeps working (up to 3 attempts). Leave empty to disable. Runs in the workspace root; uses the nemotron.commandTimeout limit"
+          "description": "Completion gate: a build/test command (e.g. 'npm test' or 'npm run build'). When set, the AI cannot declare 'Task completed' after editing files until this command exits 0. On failure its output is fed back and the AI keeps working (up to 3 attempts). Leave empty to disable. Runs in the workspace root and waits for completion (no timeout; press Stop to cancel)"
         },
         "nemotron.autoContext": {
           "type": "boolean",
@@ -263,11 +263,6 @@
           "type": "boolean",
           "default": true,
           "description": "Show a native diff preview when approving file changes"
-        },
-        "nemotron.persistentShell": {
-          "type": "boolean",
-          "default": true,
-          "description": "Use a persistent shell session for run_command (keeps cd / virtualenv state)"
         },
         "nemotron.maxContextChars": {
           "type": "number",

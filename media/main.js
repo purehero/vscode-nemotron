@@ -377,7 +377,6 @@
     { name: "save", desc: "Save the current conversation" },
     { name: "load", desc: "Load a saved conversation" },
     { name: "diff", desc: "Toggle diff preview on change approval" },
-    { name: "shell", desc: "Toggle persistent terminal session" },
     { name: "clear", desc: "Clear the conversation" },
   ];
   const slashMenu = document.getElementById("slash-menu");

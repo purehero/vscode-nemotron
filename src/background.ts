@@ -107,6 +107,36 @@ export class BackgroundJobs {
   }
 
   /**
+   * 잡이 끝나거나 graceMs 가 지날 때까지 기다린 뒤 상태를 반환한다(버퍼 소진).
+   * grace 안에 끝나면 완료 상태(→ 인라인 결과), 아니면 실행 중 상태(→ 폴링)를 준다.
+   * 죽이지 않으므로 타임아웃으로 인한 명령 실패가 없다.
+   */
+  async wait(id: string, graceMs: number): Promise<BgStatus> {
+    const job = this.jobs.get(id);
+    if (!job) {
+      return this.check(id); // 없음 상태 반환
+    }
+    if (job.running && graceMs > 0) {
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(finish, graceMs);
+        // close/error 는 한 번만 발생 → 자연 정리됨
+        job.proc.once("close", finish);
+        job.proc.once("error", finish);
+      });
+    }
+    return this.check(id);
+  }
+
+  /**
    * 잡 상태 + 직전 조회 이후의 새 출력을 반환하고 버퍼를 비운다.
    * 이미 종료된 잡은 최종 출력을 넘겨준 뒤 목록에서 제거한다(중복 폴링 방지).
    */

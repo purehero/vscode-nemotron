@@ -196,10 +196,10 @@ export const TOOL_INSTRUCTION = [
   "- apply_bytes: 'byte-level' partial edit using files that hold the before/after content. keys: path, old_file, new_file, replace_all (optional)",
   "- write_file : create/replace entirely. keys: path, plus <<<CONTENT / <<<END block",
   detectShell().kind === "bash"
-    ? "- run_command: run a command and inspect its output. keys: command (bash shell — use POSIX syntax like ls, cat, grep, $VAR, &&, |), background (optional true — see check_command)"
-    : "- run_command: run a command and inspect its output. keys: command (Windows cmd.exe — use dir, type, %VAR% syntax. POSIX commands like ls/cat/grep do not work), background (optional true — see check_command)",
-  "- check_command: poll a command started with run_command + background:true. key: id (optional; lists all running jobs if omitted). Returns only the output produced since the previous check, plus whether the job is still running or its exit code.",
-  "- stop_command: terminate a background command. key: id",
+    ? "- run_command: run a command and inspect its output. keys: command (bash shell — use POSIX syntax like ls, cat, grep, $VAR, &&, |), background (optional true). Every command runs as a background job: if it finishes quickly you get its full output and exit code inline; if it is still running after a short grace period you get a job id to poll with check_command instead of it failing on a timeout. Each command runs in its own process, so cd/venv/env do NOT carry over between calls — chain them in one command (e.g. cd sub && npm test)."
+    : "- run_command: run a command and inspect its output. keys: command (Windows cmd.exe — use dir, type, %VAR% syntax. POSIX commands like ls/cat/grep do not work), background (optional true). Every command runs as a background job: if it finishes quickly you get its full output and exit code inline; if it is still running after a short grace period you get a job id to poll with check_command instead of it failing on a timeout. Each command runs in its own process, so cd/env do NOT carry over between calls — chain them in one command (e.g. cd sub && npm test).",
+  "- check_command: poll a running command (returned as a job id by run_command). key: id (optional; lists all running jobs if omitted). Returns only the output produced since the previous check, plus whether the job is still running or its exit code. Keep polling until it reports it finished.",
+  "- stop_command: terminate a running background command. key: id",
   "- get_diagnostics: the editor's error/warning list (Problems). key: path (optional; whole workspace if omitted)",
   "- search_text : search file contents (grep). keys: query, glob (optional), regex (optional true), max (optional)",
   "- list_symbols : symbol list (language server). key: path (document symbol tree) or query (workspace symbol search)",
@@ -232,7 +232,7 @@ export const TOOL_INSTRUCTION = [
   "- get_diagnostics is accurate only when the relevant language extension (e.g. Python=Pylance) is installed. If diagnostics are empty but you suspect a syntax error, check directly with run_command (e.g. python -m py_compile file.py).",
   "- GDScript (.gd) is handled automatically by get_diagnostics: it uses Godot editor (LSP) diagnostics first, and falls back to the godot CLI (--check-only) for syntax checking.",
   "- To confirm an error by running code, view the output with run_command, then fix it with edit_file.",
-  "- Long-running commands (builds, installs like npm install / pip install, full test suites, dev servers) can exceed the command timeout and fail. Start them with run_command + background: true, which returns a job id immediately, then poll check_command with that id until it finishes. Use stop_command to cancel. Do NOT use background for quick commands.",
+  "- Long-running commands (builds, installs like npm install / pip install, full test suites, dev servers) never time out: they keep running and run_command returns a job id. Poll check_command with that id until it reports the exit code, then continue. For a command you know is long-lived (e.g. a dev server you just want to start), pass background: true so run_command returns the id right away instead of waiting.",
   "- Once you have enough information from the results, write the final answer without tools. Respond in the user's language.",
   "- **When you have finished all tool-based work, you MUST end your response with the declaration 'Task completed.' followed by a summary. Without it the system assumes the work is unfinished and will ask you to continue.**",
   "- If you need a user decision mid-task, end your response with a question that finishes with a question mark (?).",
@@ -1125,11 +1125,6 @@ function runShell(
   });
 }
 
-/** 주어진 시간(ms)만큼 대기한다. */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 /** 미리보기용으로 문자열을 앞뒤로 자른다. */
 function snippet(s: string, max = 300): string {
   const t = s.length > max ? s.slice(0, max) + " …(truncated)" : s;
@@ -1437,45 +1432,57 @@ export async function runTool(call: ToolCall, ctx: ToolContext): Promise<ToolRes
         const cwd = workspaceRoot().fsPath;
         const cfg = vscode.workspace.getConfiguration("nemotron");
         const timeoutMs = cfg.get<number>("commandTimeout", 60000);
-        // 백그라운드 실행: 완료를 기다리지 않고 즉시 잡 id 반환 → 타임아웃 무관.
-        if (call.args?.background === true && ctx.background) {
+        // 모든 명령을 백그라운드 잡으로 실행한다. 다만 grace 창 안에 끝나면 결과를
+        // 인라인으로 즉시 돌려줘서 빠른 명령은 예전처럼 동기 실행처럼 보인다.
+        // grace 를 넘겨도 죽이지 않고 백그라운드로 남긴다 → 타임아웃 실패가 없다.
+        // background:true 는 "즉시 분리"(짧은 엿보기만) 요청으로 취급한다.
+        if (ctx.background) {
+          const graceMs = call.args?.background === true ? 1000 : timeoutMs;
           const id = ctx.background.start(command);
-          // 즉시 실패(잘못된 명령 등)나 초기 로그를 잡아 보여주기 위해 잠깐 엿본다.
-          await sleep(1000);
-          const s = ctx.background.check(id);
-          const running = s.exists ? s.running : false;
-          const statusLine = running
-            ? `background started: id=${id} (running)`
-            : `background ${id} finished immediately, exit code ${s.code}`;
-          const body = s.newOutput.trim();
+          const s = await ctx.background.wait(id, graceMs);
+          const dropNote = s.dropped ? "…(earlier output dropped)\n" : "";
+          if (s.running) {
+            // 아직 실행 중 → 백그라운드로 남기고 폴링하도록 안내
+            const secs = Math.round(s.elapsedMs / 1000);
+            const statusLine = `running in background: id=${id} (${secs}s elapsed)`;
+            return {
+              name: call.name,
+              ok: true,
+              output:
+                `$ ${command}\n[${statusLine}]\n` +
+                dropNote +
+                (s.newOutput.trim() || "(no output yet)") +
+                `\n\nThis is still running. Poll check_command (id: ${id}) for further output and the exit code; stop_command (id: ${id}) to cancel.`,
+              preview: `${command}  →  ${statusLine}`,
+            };
+          }
+          // grace 안에 완료 → 일반 명령처럼 최종 결과 반환
+          const killedBySignal =
+            s.code !== null && s.code > 128 && s.code < 192;
+          const retryable = !!s.signal || killedBySignal;
+          const status = s.signal
+            ? `terminated by signal ${s.signal}`
+            : killedBySignal
+              ? `killed by signal (exit ${s.code})`
+              : `exit code ${s.code}`;
           return {
             name: call.name,
-            ok: running || s.code === 0,
+            ok: s.code === 0,
             output:
-              `$ ${command}\n[${statusLine}]\n` +
-              (body || "(no output yet)") +
-              (running
-                ? `\n\nPoll with check_command (id: ${id}) to get further output and the exit code.`
-                : ""),
-            preview: `${command}  →  ${statusLine}`,
+              `$ ${command}\n[${status}]\n` +
+              dropNote +
+              (s.newOutput.trim() || "(no output)"),
+            preview: `${command}  →  ${status}`,
+            retryable,
           };
         }
-        const usePersistent = cfg.get<boolean>("persistentShell", true) && ctx.shell;
-        const res = usePersistent
-          ? await ctx.shell!.run(command, timeoutMs)
-          : await runShell(command, cwd, timeoutMs);
-        // 시그널성/일시적 실패 판정: 셸이 죽음(crashed), 또는 명령이 시그널로
-        // 종료(bash $? = 128+signum)됐고 타임아웃이 아닌 경우 → 재시도 대상.
-        // 일반 non-zero 종료(테스트 실패·컴파일 오류 등)는 재시도해도 소용없어 제외.
+        // 폴백: 백그라운드 매니저가 없을 때만(워크스페이스 미개방 등) 단발 실행.
+        const res = await runShell(command, cwd, timeoutMs);
         const killedBySignal =
           !res.timedOut && res.code !== null && res.code > 128 && res.code < 192;
         const retryable = !!res.crashed || killedBySignal;
-        // 타임아웃 시, 오래 걸리는 명령이면 백그라운드로 다시 돌리라고 모델에 안내.
-        const timeoutHint = ctx.background
-          ? " — if this is a long-running command (build/install/test/server), re-run it with background: true and poll check_command instead"
-          : "";
         const status = res.timedOut
-          ? `stopped by timeout (${timeoutMs}ms)${usePersistent ? " (shell restarted)" : ""}${timeoutHint}`
+          ? `stopped by timeout (${timeoutMs}ms)`
           : res.crashed
             ? "shell terminated (signal?)"
             : killedBySignal

@@ -31,7 +31,6 @@ import {
   ANALYZE_INSTRUCTION,
 } from "./tools";
 import { RateLimiter } from "./rateLimiter";
-import { PersistentShell } from "./shell";
 import { BackgroundJobs } from "./background";
 
 // 빌드 시각: esbuild 의 define 로 주입된다 (tsc 는 이 선언으로 통과)
@@ -123,7 +122,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private memoryBlock?: string;
 
   // ⑫ 지속 셸 세션
-  private shell?: PersistentShell;
   private background?: BackgroundJobs;
 
   // 작업 계획(update_plan 도구) — 현재 세션의 체크리스트
@@ -144,12 +142,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ProposedContentProvider.scheme,
         this.proposed
       ),
-      {
-        dispose: () => {
-          this.shell?.dispose();
-          this.background?.disposeAll();
-        },
-      }
+      { dispose: () => this.background?.disposeAll() }
     );
   }
 
@@ -215,17 +208,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     ch.appendLine(`body :\n  ${text.slice(0, 4000)}`);
   }
 
-  private getShell(): PersistentShell | undefined {
-    const root = vscode.workspace.workspaceFolders?.[0];
-    if (!root) {
-      return undefined;
-    }
-    if (!this.shell) {
-      this.shell = new PersistentShell(root.uri.fsPath);
-    }
-    return this.shell;
-  }
-
   private getBackground(): BackgroundJobs | undefined {
     const root = vscode.workspace.workspaceFolders?.[0];
     if (!root) {
@@ -235,6 +217,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.background = new BackgroundJobs(root.uri.fsPath);
     }
     return this.background;
+  }
+
+  /**
+   * 검증 게이트용: 명령을 백그라운드로 돌려 완료까지 폴링한다(타임아웃 없음).
+   * 중단 요청 시 즉시 종료하고 aborted 를 반환한다.
+   */
+  private async runVerify(
+    bg: BackgroundJobs,
+    command: string
+  ): Promise<{ code: number | null; output: string; aborted: boolean }> {
+    const id = bg.start(command);
+    let output = "";
+    let s;
+    do {
+      if (this.abort?.signal.aborted) {
+        bg.stop(id);
+        return { code: null, output, aborted: true };
+      }
+      s = await bg.wait(id, 3000);
+      output += s.newOutput;
+    } while (s.running);
+    return { code: s.code, output, aborted: false };
   }
 
   // ── WebviewViewProvider (사이드바) ──
@@ -320,8 +324,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "stop":
         this.abort?.abort();
         if (this.busy) {
-          // 실행 중인 터미널 명령도 즉시 종료 (세션은 다음 명령에서 재시작)
-          this.shell?.dispose();
+          // 실행 중(백그라운드 포함)인 모든 터미널 명령을 즉시 종료
+          this.background?.disposeAll();
         }
         break;
       case "clear":
@@ -477,9 +481,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
       case "diff":
         await this.toggleBool("showDiff", "Diff preview when approving changes");
-        break;
-      case "shell":
-        await this.toggleBool("persistentShell", "Persistent terminal session (keeps cd/venv)");
         break;
       case "clear":
         this.clear();
@@ -2447,11 +2448,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           // 완료 게이트: 편집이 있었고 verifyCommand 가 설정돼 있으면, '작업 완료' 선언
           // 전에 빌드/테스트를 강제로 돌린다. 실패하면 결과를 되먹여 계속 작업하게 한다(최대 3회).
           const verifyCmd = cfg.get<string>("verifyCommand", "").trim();
-          const shell = this.getShell();
+          const bg = this.getBackground();
           if (
             withTools &&
             verifyCmd &&
-            shell &&
+            bg &&
             editedThisRun &&
             verifyRetries < 3 &&
             declaresCompletion(answer) &&
@@ -2462,22 +2463,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               name: "Verify",
               detail: `Verifying before completion: ${verifyCmd}`,
             });
-            const timeoutMs = cfg.get<number>("commandTimeout", 60000);
             let vr;
             try {
-              vr = await shell.run(verifyCmd, timeoutMs);
+              vr = await this.runVerify(bg, verifyCmd);
             } catch {
               vr = undefined;
             }
-            if (vr && vr.code !== 0) {
+            if (vr && !vr.aborted && vr.code !== 0) {
               verifyRetries++;
               this.history.push({ role: "assistant", content: answer });
               this.post({
                 type: "toolResult",
                 name: "Verify",
                 ok: false,
-                preview: `verify failed (exit ${vr.code ?? "?"}${
-                  vr.timedOut ? ", timeout" : ""
+                preview: `verify failed (exit ${
+                  vr.code ?? "?"
                 }) — continuing (${verifyRetries}/3)`,
                 output: vr.output.slice(0, 4000),
               });
@@ -2486,14 +2486,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 content:
                   `The verify command \`${verifyCmd}\` FAILED (exit code ${
                     vr.code ?? "unknown"
-                  }${vr.timedOut ? ", timed out" : ""}), so the task is NOT complete. ` +
+                  }), so the task is NOT complete. ` +
                   `Fix the problems and do not declare completion until it passes.\n\n` +
                   `[verify output]\n${vr.output.slice(0, 8000)}`,
                 hidden: true,
               });
               continue;
             }
-            if (vr) {
+            if (vr && !vr.aborted) {
               this.post({
                 type: "toolResult",
                 name: "Verify",
@@ -2504,7 +2504,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           } else if (
             withTools &&
             verifyCmd &&
-            shell &&
+            bg &&
             editedThisRun &&
             verifyRetries >= 3 &&
             declaresCompletion(answer)
@@ -2617,7 +2617,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             confirmWrite: (p, s, proposed) => this.confirmWrite(p, s, proposed),
             confirmCommand: (c) => this.confirmCommand(c),
             recordBackup: (p, bytes) => this.recordBackup(p, bytes),
-            shell: this.getShell(),
             background: this.getBackground(),
             runAgent: (a, t) => this.runSubAgent(a, t),
             updatePlan: (items) => {
