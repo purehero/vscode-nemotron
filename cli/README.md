@@ -12,9 +12,18 @@ IDEs get it (they just run this CLI in their built-in terminal).
 An interactive REPL: you type a request, it streams the model's response and runs
 tool calls against your project (the current working directory):
 
-- `list_files`, `read_file`, `write_file`, `edit_file`, `search_text`
+- Files: `list_files`, `read_file`, `write_file`, `edit_file`, `apply_bytes`, `search_text`
 - `run_command` — runs a shell command and **waits until it finishes** (builds,
   installs, tests included), showing elapsed time; no timeout, no polling.
+- `update_plan` — a task checklist that's injected back into the prompt.
+- `remember` / `update_memory` / `forget` — long-term memory saved in
+  `.nemotron/memory/` and auto-injected into future prompts.
+
+Robustness ported from the VSCode extension: streaming/empty-response/rate-limit
+and transient-tool retries, truncated-write protection, auto-continue when the
+model stops mid-task, a completion gate (`/verify <build-or-test-cmd>`), and
+context-budget trimming (old tool outputs are compacted to stay within
+`maxContextChars`).
 
 File writes and commands ask for confirmation unless auto-approve is on (`/auto`).
 
@@ -56,6 +65,13 @@ in-editor integration (native diff, live diagnostics) can be layered on later.
 
 ## Status
 
-MVP. The tool-call parser is currently duplicated from the extension
-(`src/tools.ts`); a later step will extract it into a shared module so there is a
-single source of truth for both.
+Working core. Ported from the VSCode extension: files/search/run tools, memory,
+plan, retries, completion gate, context trimming.
+
+Not yet ported (planned): `run_agent` (sub-agents — needs an agents config),
+model-based summarization of old tool output (the CLI uses rule-based compaction
+for now), and `get_diagnostics` (the extension uses the IDE language server; the
+CLI would need `tsc`/`eslint`/per-language checks instead).
+
+The tool-call parser is currently duplicated from the extension (`src/tools.ts`);
+a later step will extract it into a shared module for a single source of truth.

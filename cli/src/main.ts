@@ -5,6 +5,7 @@ import * as readline from "readline";
 import { ChatMessage } from "../../src/nemotron";
 import { loadConfig, saveConfigValue, configPath, CliConfig } from "./config";
 import { runAgentTurn, AgentIO } from "./agent";
+import { PlanItem } from "./tools";
 
 const C = {
   reset: "\x1b[0m",
@@ -37,6 +38,7 @@ const HELP = [
 async function main() {
   let cfg = loadConfig();
   const history: ChatMessage[] = [];
+  const plan: PlanItem[] = [];
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -128,6 +130,7 @@ async function main() {
         return true;
       case "clear":
         history.length = 0;
+        plan.length = 0;
         process.stdout.write(paint(C.green, "conversation cleared\n"));
         return true;
       case "exit":
@@ -157,7 +160,7 @@ async function main() {
     history.push({ role: "user", content: input });
     currentAbort = new AbortController();
     try {
-      await runAgentTurn(history, cfg, io, currentAbort.signal);
+      await runAgentTurn(history, plan, cfg, io, currentAbort.signal);
     } catch (e: any) {
       io.writeSystem(`error: ${e?.message ?? e}`);
     } finally {

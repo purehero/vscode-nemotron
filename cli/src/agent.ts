@@ -12,11 +12,48 @@ import {
   unknownToolAttempt,
   toolNameList,
 } from "./protocol";
-import { runTool, execCommand, ExecContext, ToolResult } from "./tools";
+import { runTool, execCommand, ExecContext, ToolResult, PlanItem } from "./tools";
 import { ToolCall } from "./protocol";
 import { declaresCompletion, looksUnfinished, endsWithQuestion } from "./heuristics";
+import { listMemories, formatMemoriesForPrompt, MEMORY_INSTRUCTION } from "./memory";
 
-const WRITE_TOOLS = ["write_file", "edit_file"];
+const WRITE_TOOLS = ["write_file", "edit_file", "apply_bytes"];
+
+function formatPlan(items: PlanItem[]): string {
+  return items.map((i) => `${i.done ? "[x]" : "[ ]"} ${i.text}`).join("\n");
+}
+
+/** 규칙 기반 압축: 긴 도구 출력의 앞·뒤만 남기고 중간을 생략(에러/종료코드는 앞뒤에 있음). */
+function compact(content: string): string {
+  const HEAD = 1600;
+  const TAIL = 800;
+  if (content.length <= HEAD + TAIL + 200) return content;
+  const omitted = content.length - HEAD - TAIL;
+  return (
+    content.slice(0, HEAD) +
+    `\n\n... (${omitted.toLocaleString("en-US")} chars omitted to save context; re-run the tool if needed) ...\n\n` +
+    content.slice(-TAIL)
+  );
+}
+
+/** 컨텍스트 예산 안에서 최신부터 유지. 오래된 도구 결과는 압축본으로 대체. */
+function budgetHistory(history: ChatMessage[], cfg: CliConfig): ChatMessage[] {
+  const isTool = (m: ChatMessage) => m.role === "user" && m.content.startsWith("[Tool ");
+  const toolIdx = history.map((m, i) => (isTool(m) ? i : -1)).filter((i) => i >= 0);
+  const fullSet = new Set(toolIdx.slice(toolIdx.length - Math.max(0, cfg.toolResultFullCount)));
+  const eff = (m: ChatMessage, i: number) =>
+    isTool(m) && !fullSet.has(i) ? compact(m.content) : m.content;
+  const keep: ChatMessage[] = [];
+  let acc = 0;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const content = eff(history[i], i);
+    if (keep.length > 0 && acc + content.length > cfg.maxContextChars) continue;
+    acc += content.length;
+    keep.push({ role: history[i].role, content });
+  }
+  keep.reverse();
+  return keep;
+}
 
 export interface AgentIO {
   writeContent: (text: string) => void;
@@ -131,6 +168,7 @@ function callLabel(call: ToolCall): string {
 /** 한 사용자 입력을 처리한다. history 는 호출측이 유지한다(대화 이어짐). */
 export async function runAgentTurn(
   history: ChatMessage[],
+  plan: PlanItem[],
   cfg: CliConfig,
   io: AgentIO,
   signal: AbortSignal
@@ -141,7 +179,28 @@ export async function runAgentTurn(
     commandTimeout: cfg.commandTimeout,
     confirm: io.confirm,
     onProgress: io.writeProgress,
+    onPlan: (items) => {
+      plan.length = 0;
+      plan.push(...items);
+      io.writeTool("📋 plan:\n" + formatPlan(items));
+    },
   };
+
+  // system prompt: 기본 + 도구 지시문 + (메모리 지시문) + 메모리 블록 + 현재 계획
+  function buildSystem(): string {
+    let sys = cfg.systemPrompt + "\n\n" + TOOL_INSTRUCTION;
+    if (cfg.enableMemory) {
+      sys += MEMORY_INSTRUCTION;
+      const block = formatMemoriesForPrompt(listMemories(root), cfg.maxMemoryChars);
+      if (block) {
+        sys += "\n\n[Long-term memory — lessons/preferences saved across sessions]\n" + block;
+      }
+    }
+    if (plan.length > 0 && plan.some((p) => !p.done)) {
+      sys += "\n\n[Current task plan]\n" + formatPlan(plan);
+    }
+    return sys;
+  }
 
   let iter = 0;
   let formatRetries = 0;
@@ -157,8 +216,8 @@ export async function runAgentTurn(
     if (signal.aborted) return;
 
     const messages: ChatMessage[] = [
-      { role: "system", content: cfg.systemPrompt + "\n\n" + TOOL_INSTRUCTION },
-      ...history,
+      { role: "system", content: buildSystem() },
+      ...budgetHistory(history, cfg),
     ];
 
     let answer: string;

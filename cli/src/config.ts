@@ -21,6 +21,14 @@ export interface CliConfig {
   autoApprove: boolean;
   /** 완료 게이트: 편집이 있었고 이 값이 설정되면 '작업 완료' 선언 전 이 명령이 exit 0 이어야 함 */
   verifyCommand: string;
+  /** 장기 메모리 사용(주입·remember 도구) */
+  enableMemory: boolean;
+  /** 프롬프트에 주입할 메모리 최대 글자수 */
+  maxMemoryChars: number;
+  /** 컨텍스트 길이 예산(글자수). 초과 시 오래된 도구 결과부터 압축·제외 */
+  maxContextChars: number;
+  /** 원문 유지할 최신 도구 결과 개수(나머지는 규칙 압축) */
+  toolResultFullCount: number;
 }
 
 const DEFAULTS: Omit<CliConfig, "apiKey"> = {
@@ -37,6 +45,10 @@ const DEFAULTS: Omit<CliConfig, "apiKey"> = {
   maxIterations: 50,
   autoApprove: false,
   verifyCommand: "",
+  enableMemory: true,
+  maxMemoryChars: 4000,
+  maxContextChars: 600000,
+  toolResultFullCount: 3,
 };
 
 export function configPath(): string {

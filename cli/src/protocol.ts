@@ -13,8 +13,13 @@ export const CLI_TOOL_NAMES = [
   "read_file",
   "write_file",
   "edit_file",
+  "apply_bytes",
   "run_command",
   "search_text",
+  "update_plan",
+  "remember",
+  "update_memory",
+  "forget",
 ] as const;
 
 function isToolName(s: any): boolean {
@@ -90,13 +95,15 @@ function parseBlock(tag: string, lines: string[]): ToolCall | null {
   idx++;
 
   const args: Record<string, any> = {};
-  let section: "old" | "new" | "content" | null = null;
+  let section: "old" | "new" | "content" | "plan" | null = null;
   const oldBuf: string[] = [];
   const newBuf: string[] = [];
   const contentBuf: string[] = [];
+  const planBuf: string[] = [];
   let hasOld = false;
   let hasNew = false;
   let hasContent = false;
+  let hasPlan = false;
 
   for (; idx < lines.length; idx++) {
     const line = lines[idx];
@@ -116,6 +123,11 @@ function parseBlock(tag: string, lines: string[]): ToolCall | null {
       hasContent = true;
       continue;
     }
+    if (marker === "<<<PLAN") {
+      section = "plan";
+      hasPlan = true;
+      continue;
+    }
     if (marker === "<<<END") {
       section = null;
       continue;
@@ -130,6 +142,10 @@ function parseBlock(tag: string, lines: string[]): ToolCall | null {
     }
     if (section === "content") {
       contentBuf.push(line);
+      continue;
+    }
+    if (section === "plan") {
+      planBuf.push(line);
       continue;
     }
     const kv = line.match(/^\s*([a-zA-Z_]+)\s*:\s?(.*)$/);
@@ -154,6 +170,9 @@ function parseBlock(tag: string, lines: string[]): ToolCall | null {
   }
   if (hasContent) {
     args.content = contentBuf.join("\n");
+  }
+  if (hasPlan) {
+    args.plan = planBuf.join("\n");
   }
   const call: ToolCall = { name, args };
   if (section !== null) {
