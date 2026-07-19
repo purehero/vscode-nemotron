@@ -17,18 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Development install" section in the README.
 
 - Background commands: `run_command` no longer fails long-running commands
-  (builds, installs, full test suites, dev servers) on the timeout. Every
-  command now runs as a background job — if it finishes within the
-  `nemotron.commandTimeout` grace window its full output is returned inline
-  (quick commands feel unchanged), otherwise it keeps running and returns a job
-  id. The AI polls it with the new `check_command` tool (returns only the output
-  since the last check, plus running/exit status) and can cancel with the new
-  `stop_command`. Commands are never killed for exceeding the timeout. Pass
-  `background: true` to detach immediately (e.g. starting a dev server). The
-  completion-gate verify command (`nemotron.verifyCommand`) likewise now waits
-  for completion instead of timing out. Each command runs in its own process, so
-  `cd`/venv/env no longer carry over between calls — chain them in one command.
-  Jobs are killed when the run is stopped or the chat panel is disposed.
+  (builds, installs, full test suites, dev servers) on the timeout. Commands run
+  in the foreground in the persistent shell as before (cd/venv/env carry over,
+  output returned inline), but if one exceeds `nemotron.commandTimeout` it is
+  no longer killed and failed — it is automatically restarted in the background
+  and `run_command` returns a job id. The AI polls it with the new
+  `check_command` tool (returns only the output since the last check, plus
+  running/exit status) and can cancel with the new `stop_command`. Pass
+  `background: true` to detach immediately without spending the timeout in the
+  foreground (e.g. starting a dev server). The completion-gate verify command
+  (`nemotron.verifyCommand`) likewise now waits for completion instead of timing
+  out. Background jobs run from the workspace root and are killed when the run is
+  stopped or the chat panel is disposed.
 - Screen capture + vision (macOS): the AI can capture a specific app's window
   with the `capture_screen` tool (target by app name, or the full screen),
   send it to an NVIDIA vision model (`nemotron.visionModel`), and get back a

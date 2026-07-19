@@ -32,6 +32,7 @@ import {
 } from "./tools";
 import { RateLimiter } from "./rateLimiter";
 import { BackgroundJobs } from "./background";
+import { PersistentShell } from "./shell";
 import * as cp from "child_process";
 import * as fs from "fs";
 import * as path from "path";
@@ -126,6 +127,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   // ⑫ 지속 셸 세션
   private background?: BackgroundJobs;
+  private shell?: PersistentShell;
 
   // 작업 계획(update_plan 도구) — 현재 세션의 체크리스트
   private plan: { text: string; done: boolean }[] = [];
@@ -145,7 +147,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ProposedContentProvider.scheme,
         this.proposed
       ),
-      { dispose: () => this.background?.disposeAll() }
+      {
+        dispose: () => {
+          this.shell?.dispose();
+          this.background?.disposeAll();
+        },
+      }
     );
   }
 
@@ -220,6 +227,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.background = new BackgroundJobs(root.uri.fsPath);
     }
     return this.background;
+  }
+
+  private getShell(): PersistentShell | undefined {
+    const root = vscode.workspace.workspaceFolders?.[0];
+    if (!root) {
+      return undefined;
+    }
+    if (!this.shell) {
+      this.shell = new PersistentShell(root.uri.fsPath);
+    }
+    return this.shell;
   }
 
   /**
@@ -327,7 +345,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "stop":
         this.abort?.abort();
         if (this.busy) {
-          // 실행 중(백그라운드 포함)인 모든 터미널 명령을 즉시 종료
+          // 실행 중인 포그라운드 명령과 모든 백그라운드 잡을 즉시 종료
+          this.shell?.dispose();
           this.background?.disposeAll();
         }
         break;
@@ -2704,6 +2723,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             confirmWrite: (p, s, proposed) => this.confirmWrite(p, s, proposed),
             confirmCommand: (c) => this.confirmCommand(c),
             recordBackup: (p, bytes) => this.recordBackup(p, bytes),
+            shell: this.getShell(),
             background: this.getBackground(),
             runAgent: (a, t) => this.runSubAgent(a, t),
             updatePlan: (items) => {

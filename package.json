@@ -2,7 +2,7 @@
   "name": "nemotron-chat",
   "displayName": "Nemotron Chat",
   "description": "NVIDIA Nemotron AI chat and coding assistant for VSCode",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -229,7 +229,7 @@
         "nemotron.commandTimeout": {
           "type": "number",
           "default": 60000,
-          "description": "run_command grace period (milliseconds). Every command runs as a background job; if it finishes within this window its full output is returned inline, otherwise it keeps running in the background and a job id is returned to poll with check_command. Commands are never killed for exceeding this — it only decides how long to wait inline before handing back a job id."
+          "description": "run_command foreground timeout (milliseconds). Commands run in the foreground with this limit; if one exceeds it, instead of failing it is restarted in the background and run_command returns a job id to poll with check_command."
         },
         "nemotron.verifyCommand": {
           "type": "string",
